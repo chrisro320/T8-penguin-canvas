@@ -305,6 +305,8 @@ export default function ApiSettingsModal({ open, onClose }: ApiSettingsModalProp
   const [advancedTestStatus, setAdvancedTestStatus] = useState<Record<string, { loading?: boolean; ok?: boolean; message?: string }>>({});
   // 拉取到的模型列表(按 provider id)
   const [fetchedModels, setFetchedModels] = useState<Record<string, { loading?: boolean; models?: string[]; error?: string }>>({});
+  // 逐模型手动改类(覆盖自动分类),key = `${providerId}::${model}`
+  const [modelKindOverride, setModelKindOverride] = useState<Record<string, 'image' | 'video' | 'chat'>>({});
   const [advancedComfyDrafts, setAdvancedComfyDrafts] = useState<Record<string, { workflowJson?: string; fields?: string; excludeRules?: string }>>({});
   const [cloudUploadOpen, setCloudUploadOpen] = useState(false);
   const [cloudUploadTargetsInput, setCloudUploadTargetsInput] = useState<CloudUploadTargetConfig[]>([]);
@@ -860,11 +862,58 @@ export default function ApiSettingsModal({ open, onClose }: ApiSettingsModalProp
     }
   };
 
-  // 点击模型 chip,加入/移出该平台的聊天模型列表。
-  const toggleAdvancedChatModel = (provider: AdvancedProviderConfig, model: string) => {
-    const cur = provider.chatModels || [];
-    const next = cur.includes(model) ? cur.filter((m) => m !== model) : [...cur, model];
-    updateAdvancedProvider(provider.id, { chatModels: next });
+  // 按模型名智能判断类别(视频 > 图像 > 默认聊天)。
+  const classifyModelKind = (model: string): 'image' | 'video' | 'chat' => {
+    const m = String(model || '').toLowerCase();
+    if (/(video|seedance|veo\d|veo-|sora|kling|runway|gen-?[234]|hailuo|minimax.*(video|hailuo)|wan[x\d]|pika|ltx|mochi|cogvideo|vidu|luma|dream-?machine|hunyuan-?video|wanx)/.test(m)) return 'video';
+    if (/(image|img|flux|sd-?xl|sd[._-]?\d|stable-?diffusion|dall-?e|imagen|nano-?banana|seedream|midjourney|\bmj\b|qwen-?image|kontext|ideogram|recraft|playground-v|firefly|janus|hidream|grok-image|cogview|kolors)/.test(m)) return 'image';
+    return 'chat';
+  };
+  const modelFieldForKind = (kind: 'image' | 'video' | 'chat'): 'imageModels' | 'videoModels' | 'chatModels' =>
+    kind === 'image' ? 'imageModels' : kind === 'video' ? 'videoModels' : 'chatModels';
+
+  // 有效类别 = 手动覆盖优先,否则自动分类。
+  const effectiveModelKind = (providerId: string, model: string): 'image' | 'video' | 'chat' =>
+    modelKindOverride[`${providerId}::${model}`] || classifyModelKind(model);
+
+  // 点击标签循环改类(图→视→聊→图);若已加入旧类别框则同步搬到新类别框。
+  const cycleModelKind = (provider: AdvancedProviderConfig, model: string) => {
+    const order: Array<'image' | 'video' | 'chat'> = ['image', 'video', 'chat'];
+    const oldKind = effectiveModelKind(provider.id, model);
+    const newKind = order[(order.indexOf(oldKind) + 1) % order.length];
+    setModelKindOverride((prev) => ({ ...prev, [`${provider.id}::${model}`]: newKind }));
+    const oldField = modelFieldForKind(oldKind);
+    const newField = modelFieldForKind(newKind);
+    if (((provider as any)[oldField] || []).includes(model)) {
+      const patch: any = {
+        [oldField]: ((provider as any)[oldField] || []).filter((m: string) => m !== model),
+      };
+      patch[newField] = [...((provider as any)[newField] || []).filter((m: string) => m !== model), model];
+      updateAdvancedProvider(provider.id, patch);
+    }
+  };
+
+  // 点击模型名,按有效类别加入/移出对应的模型框。
+  const toggleAdvancedModelSmart = (provider: AdvancedProviderConfig, model: string) => {
+    const field = modelFieldForKind(effectiveModelKind(provider.id, model));
+    const cur = (provider as any)[field] || [];
+    const next = cur.includes(model) ? cur.filter((m: string) => m !== model) : [...cur, model];
+    updateAdvancedProvider(provider.id, { [field]: next } as Partial<AdvancedProviderConfig>);
+  };
+
+  // 一键把拉取到的所有模型按有效类别智能填入三个框(去重追加)。
+  const smartFillAllModels = (provider: AdvancedProviderConfig) => {
+    const models = fetchedModels[provider.id]?.models || [];
+    const buckets: Record<'imageModels' | 'videoModels' | 'chatModels', string[]> = {
+      imageModels: [...(provider.imageModels || [])],
+      videoModels: [...(provider.videoModels || [])],
+      chatModels: [...(provider.chatModels || [])],
+    };
+    for (const model of models) {
+      const field = modelFieldForKind(effectiveModelKind(provider.id, model));
+      if (!buckets[field].includes(model)) buckets[field].push(model);
+    }
+    updateAdvancedProvider(provider.id, buckets as Partial<AdvancedProviderConfig>);
   };
 
   const handleTestAdvancedProvider = async (provider: AdvancedProviderConfig) => {
@@ -2198,44 +2247,81 @@ export default function ApiSettingsModal({ open, onClose }: ApiSettingsModalProp
             </div>
             {provider.protocol === 'openai-compatible' && (
               <div className="mt-3 space-y-2">
-                <button
-                  type="button"
-                  onClick={() => handleFetchModels(provider)}
-                  disabled={!!fetchedModels[provider.id]?.loading}
-                  className={
-                    isPixel
-                      ? 't8-api-settings-secondary-btn px-btn text-[11px] px-2 py-1'
-                      : 't8-api-settings-secondary-btn px-2 py-1 text-[11px] rounded border inline-flex items-center gap-1'
-                  }
-                >
-                  <Download size={12} />
-                  {fetchedModels[provider.id]?.loading ? '拉取中...' : '拉取模型列表'}
-                </button>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleFetchModels(provider)}
+                    disabled={!!fetchedModels[provider.id]?.loading}
+                    className={
+                      isPixel
+                        ? 't8-api-settings-secondary-btn px-btn text-[11px] px-2 py-1'
+                        : 't8-api-settings-secondary-btn px-2 py-1 text-[11px] rounded border inline-flex items-center gap-1'
+                    }
+                  >
+                    <Download size={12} />
+                    {fetchedModels[provider.id]?.loading ? '拉取中...' : '拉取模型列表'}
+                  </button>
+                  {fetchedModels[provider.id]?.models && fetchedModels[provider.id]!.models!.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => smartFillAllModels(provider)}
+                      title="按模型名智能分类,一次填满图像/视频/聊天三个框"
+                      className={
+                        isPixel
+                          ? 't8-api-settings-secondary-btn px-btn text-[11px] px-2 py-1'
+                          : 'px-2 py-1 text-[11px] rounded border border-emerald-500/40 text-emerald-400 inline-flex items-center gap-1 hover:bg-emerald-500/10 transition'
+                      }
+                    >
+                      <Download size={12} /> 智能填入全部
+                    </button>
+                  )}
+                </div>
                 {fetchedModels[provider.id]?.error && (
                   <div className="text-[11px] text-red-400">{fetchedModels[provider.id]?.error}</div>
                 )}
                 {fetchedModels[provider.id]?.models && (
                   <div className="space-y-1.5">
                     <div className={`text-[11px] ${hintCls}`}>
-                      共 {fetchedModels[provider.id]!.models!.length} 个 · 点击加入「聊天模型」（✓ 已加；图像/视频请手动复制到对应框）
+                      共 {fetchedModels[provider.id]!.models!.length} 个 · 点模型名按归类加入对应框（蓝=图像 紫=视频 绿=聊天，✓ 已加）；点左侧 [图/视/聊] 标签可循环改类纠正误判；或上方「智能填入全部」一键填满
                     </div>
                     <div className="flex flex-wrap gap-1.5 max-h-48 overflow-y-auto">
                       {fetchedModels[provider.id]!.models!.map((m) => {
-                        const added = (provider.chatModels || []).includes(m);
+                        const kind = effectiveModelKind(provider.id, m);
+                        const field = modelFieldForKind(kind);
+                        const added = ((provider as any)[field] || []).includes(m);
+                        const tone = kind === 'image' ? 'sky' : kind === 'video' ? 'purple' : 'emerald';
+                        const addedCls =
+                          tone === 'sky' ? 'border-sky-500/50 text-sky-400 bg-sky-500/10'
+                            : tone === 'purple' ? 'border-purple-500/50 text-purple-400 bg-purple-500/10'
+                              : 'border-emerald-500/50 text-emerald-400 bg-emerald-500/10';
+                        const idleCls =
+                          tone === 'sky' ? 'border-sky-500/25 hover:border-sky-500/50'
+                            : tone === 'purple' ? 'border-purple-500/25 hover:border-purple-500/50'
+                              : 'border-emerald-500/25 hover:border-emerald-500/50';
+                        const tag = kind === 'image' ? '图' : kind === 'video' ? '视' : '聊';
+                        const kindLabel = kind === 'image' ? '图像' : kind === 'video' ? '视频' : '聊天';
                         return (
-                          <button
+                          <span
                             key={m}
-                            type="button"
-                            onClick={() => toggleAdvancedChatModel(provider, m)}
-                            title={added ? '点击移出聊天模型' : '点击加入聊天模型'}
-                            className={
-                              added
-                                ? 'px-2 py-0.5 text-[11px] rounded-full border border-emerald-500/40 text-emerald-400 bg-emerald-500/10 transition'
-                                : `px-2 py-0.5 text-[11px] rounded-full border transition hover:border-white/40 ${hintCls}`
-                            }
+                            className={`inline-flex items-center rounded-full border text-[11px] transition ${added ? addedCls : `${idleCls} ${hintCls}`}`}
                           >
-                            {added ? '✓ ' : ''}{m}
-                          </button>
+                            <button
+                              type="button"
+                              onClick={() => cycleModelKind(provider, m)}
+                              title={`当前归类「${kindLabel}」· 点此循环切换 图→视→聊`}
+                              className="px-1.5 py-0.5 opacity-70 hover:opacity-100 border-r border-current/20"
+                            >
+                              [{tag}]
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => toggleAdvancedModelSmart(provider, m)}
+                              title={`${kindLabel}模型 · ${added ? '点击移出' : '点击加入'}${kindLabel}框`}
+                              className="px-1.5 py-0.5"
+                            >
+                              {added ? '✓ ' : ''}{m}
+                            </button>
+                          </span>
                         );
                       })}
                     </div>
