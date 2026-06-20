@@ -812,6 +812,36 @@ export default function ApiSettingsModal({ open, onClose }: ApiSettingsModalProp
     setAdvancedDirty(true);
   };
 
+  // 新增一个 OpenAI 兼容平台(可加任意多个,各自独立 base URL + Key + 模型)。
+  // 后端 normalizeAdvancedProviders 按 id 收录,只要 id 唯一即可持久化。
+  const addOpenAiProvider = () => {
+    const id = `openai-compatible-${Date.now().toString(36)}`;
+    const count = advancedProvidersInput.filter((p) => p.protocol === 'openai-compatible').length + 1;
+    const next: AdvancedProviderConfig = {
+      id,
+      label: `OpenAI 兼容 ${count}`,
+      protocol: 'openai-compatible',
+      enabled: false,
+      baseUrl: '',
+      apiKey: '',
+      chatModels: [],
+      imageModels: [],
+      videoModels: [],
+    };
+    setAdvancedProvidersInput((prev) => [...prev, next]);
+    setActiveAdvancedProviderId(id);
+    setAdvancedDirty(true);
+  };
+
+  // 仅允许删除用户新增的 OpenAI 兼容平台(内置默认槽 id='openai-compatible' 等会被后端重新铺底,删了也回来)。
+  const isRemovableProvider = (provider: AdvancedProviderConfig) =>
+    provider.protocol === 'openai-compatible' && provider.id !== 'openai-compatible';
+  const removeAdvancedProvider = (id: string) => {
+    setAdvancedProvidersInput((prev) => prev.filter((p) => p.id !== id));
+    setActiveAdvancedProviderId('');
+    setAdvancedDirty(true);
+  };
+
   const handleTestAdvancedProvider = async (provider: AdvancedProviderConfig) => {
     setAdvancedTestStatus((prev) => ({ ...prev, [provider.id]: { loading: true } }));
     try {
@@ -1554,6 +1584,20 @@ export default function ApiSettingsModal({ open, onClose }: ApiSettingsModalProp
             <TestTube2 size={12} />
             {advancedTestStatus[provider.id]?.loading ? '测试中...' : '测试连接'}
           </button>
+          {isRemovableProvider(provider) && (
+            <button
+              type="button"
+              onClick={() => removeAdvancedProvider(provider.id)}
+              title="删除该自定义平台"
+              className={
+                isPixel
+                  ? 't8-api-settings-secondary-btn px-btn text-[11px] px-2 py-1 shrink-0'
+                  : 'px-2 py-1 text-[11px] rounded border border-red-500/30 text-red-400 shrink-0 inline-flex items-center gap-1 hover:bg-red-500/10 transition'
+              }
+            >
+              <Trash2 size={12} /> 删除
+            </button>
+          )}
         </div>
 
         {advancedTestStatus[provider.id]?.message && (
@@ -2535,7 +2579,7 @@ export default function ApiSettingsModal({ open, onClose }: ApiSettingsModalProp
                         >
                           <div className="flex items-center gap-2 min-w-0 w-full">
                             <span className={`w-2 h-2 rounded-full shrink-0 ${provider.enabled ? 'bg-emerald-400' : 'bg-zinc-400'}`} />
-                            <span className="font-bold min-w-0 truncate">{ADVANCED_PROVIDER_LABELS[provider.protocol] || provider.label || provider.id}</span>
+                            <span className="font-bold min-w-0 truncate">{provider.label || ADVANCED_PROVIDER_LABELS[provider.protocol] || provider.id}</span>
                             <span className={`ml-auto text-[10px] shrink-0 ${provider.enabled ? 'text-emerald-500' : hintCls}`}>
                               {provider.enabled ? '已启用' : '未启用'}
                             </span>
@@ -2545,6 +2589,17 @@ export default function ApiSettingsModal({ open, onClose }: ApiSettingsModalProp
                           </div>
                         </button>
                       ))}
+                      <button
+                        type="button"
+                        onClick={addOpenAiProvider}
+                        className={
+                          isPixel
+                            ? 't8-api-settings-provider-card w-full !block text-left px-2 py-2 px-btn'
+                            : 'w-full flex items-center justify-center gap-1.5 px-2 py-2 rounded-md border border-dashed text-xs transition hover:border-white/40'
+                        }
+                      >
+                        <Plus size={12} /> 新增 OpenAI 兼容平台
+                      </button>
                     </div>
                     <div className="min-w-0">
                       {activeAdvancedProvider && renderAdvancedProviderForm(activeAdvancedProvider)}
