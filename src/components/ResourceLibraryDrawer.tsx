@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Eye,
   FolderPlus,
@@ -14,7 +14,9 @@ import {
   Search,
   Send,
   Star,
+  Loader2,
   Trash2,
+  Upload,
   UserRoundCog,
   Video,
   Workflow,
@@ -23,7 +25,7 @@ import {
 import type { CSSProperties } from 'react';
 import { useThemeStore } from '../stores/theme';
 import * as api from '../services/api';
-import type { ResourceCategory, ResourceItem, ResourceKind } from '../services/api';
+import type { ResourceAddKind, ResourceCategory, ResourceItem, ResourceKind } from '../services/api';
 import { isPortraitResourceItem } from '../utils/portraitResource';
 import { resourceItemToSendMaterials } from '../utils/sendMaterials';
 import { summarizeWorkflowResource } from '../utils/workflowResource';
@@ -169,6 +171,17 @@ function stopResourceControlEvent(event: { stopPropagation: () => void }) {
   event.stopPropagation();
 }
 
+type ResourceLibraryDialog =
+  | { kind: 'add-category'; title: string; value: string; resourceKind: ResourceKind }
+  | { kind: 'rename-category'; title: string; value: string; category: ResourceCategory }
+  | { kind: 'delete-category'; title: string; message: string; category: ResourceCategory }
+  | { kind: 'rename-item'; title: string; value: string; item: ResourceItem }
+  | { kind: 'delete-item'; title: string; message: string; item: ResourceItem };
+
+function dialogHasValue(dialog: ResourceLibraryDialog): dialog is Extract<ResourceLibraryDialog, { value: string }> {
+  return 'value' in dialog;
+}
+
 export default function ResourceLibraryDrawer({ open, onClose, onInsertMaterial }: ResourceLibraryDrawerProps) {
   const { theme, style } = useThemeStore();
   const isDark = theme === 'dark';
@@ -182,6 +195,9 @@ export default function ResourceLibraryDrawer({ open, onClose, onInsertMaterial 
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState('');
   const [hoverPreview, setHoverPreview] = useState<{ src: string; title: string; left: number; top: number } | null>(null);
+  const [dialog, setDialog] = useState<ResourceLibraryDialog | null>(null);
+  const [dialogBusy, setDialogBusy] = useState(false);
+  const dialogInputRef = useRef<HTMLInputElement | null>(null);
 
   const load = useCallback(async () => {
     if (!open) return;
@@ -208,6 +224,39 @@ export default function ResourceLibraryDrawer({ open, onClose, onInsertMaterial 
     load();
   }, [load]);
 
+  // 本地文件上传(图像/视频/音频/全景标签)
+  const uploadInputRef = useRef<HTMLInputElement | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const canUpload = kind === 'image' || kind === 'video' || kind === 'audio' || kind === 'panorama';
+  const uploadAccept = kind === 'video' ? 'video/*' : kind === 'audio' ? 'audio/*' : 'image/*';
+  const handleUploadFiles = async (files: FileList | null) => {
+    const list = files ? Array.from(files) : [];
+    if (!list.length) return;
+    setUploading(true);
+    let ok = 0; let fail = 0;
+    for (const file of list) {
+      try {
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result || ''));
+          reader.onerror = () => reject(new Error('读取文件失败'));
+          reader.readAsDataURL(file);
+        });
+        const r = await api.addResourceItem({
+          url: dataUrl,
+          kind: kind as ResourceAddKind,
+          categoryId: categoryId !== 'all' ? categoryId : undefined,
+          title: file.name,
+        });
+        if (r.success) ok += 1; else fail += 1;
+      } catch { fail += 1; }
+    }
+    setUploading(false);
+    setMsg(fail ? `上传完成：成功 ${ok}，失败 ${fail}` : `已上传 ${ok} 个到资源库`);
+    window.dispatchEvent(new CustomEvent('penguin:resources-changed'));
+    void load();
+  };
+
   useEffect(() => {
     if (!open) return;
     const onChanged = () => load();
@@ -220,39 +269,37 @@ export default function ResourceLibraryDrawer({ open, onClose, onInsertMaterial 
     setFavoriteOnly(false);
   }, [kind]);
 
+  useEffect(() => {
+    if (!dialog || !dialogHasValue(dialog)) return;
+    const id = window.setTimeout(() => dialogInputRef.current?.focus(), 0);
+    return () => window.clearTimeout(id);
+  }, [dialog]);
+
+  useEffect(() => {
+    if (!open) setDialog(null);
+  }, [open]);
+
   const activeMeta = KIND_META[kind];
   const ActiveIcon = activeMeta.icon;
   const totalText = useMemo(() => `${items.length} 个资源`, [items.length]);
 
-  const addCategory = async () => {
-    const name = window.prompt(`新建${activeMeta.label}分类`);
-    if (!name?.trim()) return;
-    const r = await api.addResourceCategory(kind, name.trim());
-    if (r.success) {
-      setMsg(`已创建分类：${name.trim()}`);
-      setCategoryId(r.data.id);
-      await load();
-    } else {
-      setMsg(r.error || '分类创建失败');
-    }
+  const addCategory = () => {
+    setDialog({ kind: 'add-category', title: `新建${activeMeta.label}分类`, value: '', resourceKind: kind });
   };
 
-  const renameCategory = async (cat: ResourceCategory) => {
+  const renameCategory = (cat: ResourceCategory) => {
     if (cat.system) return;
-    const name = window.prompt('重命名分类', cat.name);
-    if (!name?.trim() || name.trim() === cat.name) return;
-    const r = await api.renameResourceCategory(cat.id, name.trim());
-    setMsg(r.success ? '分类已重命名' : r.error || '分类重命名失败');
-    await load();
+    setDialog({ kind: 'rename-category', title: '重命名分类', value: cat.name, category: cat });
   };
 
-  const removeCategory = async (cat: ResourceCategory) => {
+  const removeCategory = (cat: ResourceCategory) => {
     if (cat.system) return;
-    if (!window.confirm(`删除分类「${cat.name}」？该分类内资源会移动到未分类。`)) return;
-    const r = await api.deleteResourceCategory(cat.id);
-    setMsg(r.success ? '分类已删除' : r.error || '分类删除失败');
-    if (categoryId === cat.id) setCategoryId('all');
-    await load();
+    setDialog({
+      kind: 'delete-category',
+      title: '删除分类',
+      message: `删除分类「${cat.name}」？该分类内资源会移动到未分类。`,
+      category: cat,
+    });
   };
 
   const updateItem = async (item: ResourceItem, patch: Parameters<typeof api.updateResourceItem>[1]) => {
@@ -260,26 +307,102 @@ export default function ResourceLibraryDrawer({ open, onClose, onInsertMaterial 
     if (r.success) {
       setItems((prev) => prev.map((x) => (x.id === item.id ? r.data : x)));
       window.dispatchEvent(new CustomEvent('penguin:resources-changed'));
+      return true;
     } else {
       setMsg(r.error || '资源更新失败');
+      return false;
     }
   };
 
-  const renameItem = async (item: ResourceItem) => {
-    const title = window.prompt('资源名称', item.title);
-    if (!title?.trim() || title.trim() === item.title) return;
-    await updateItem(item, { title: title.trim() });
+  const renameItem = (item: ResourceItem) => {
+    setDialog({ kind: 'rename-item', title: '资源名称', value: item.title, item });
   };
 
-  const deleteItem = async (item: ResourceItem) => {
-    if (!window.confirm(`从资源库删除「${item.title}」？`)) return;
-    const r = await api.deleteResourceItem(item.id);
-    if (r.success) {
-      setItems((prev) => prev.filter((x) => x.id !== item.id));
-      setMsg('资源已删除');
-      window.dispatchEvent(new CustomEvent('penguin:resources-changed'));
-    } else {
-      setMsg(r.error || '资源删除失败');
+  const deleteItem = (item: ResourceItem) => {
+    setDialog({
+      kind: 'delete-item',
+      title: '删除资源',
+      message: `从资源库删除「${item.title}」？`,
+      item,
+    });
+  };
+
+  const updateDialogValue = (value: string) => {
+    setDialog((current) => (current && dialogHasValue(current) ? { ...current, value } : current));
+  };
+
+  const closeDialog = () => {
+    if (!dialogBusy) setDialog(null);
+  };
+
+  const submitDialog = async () => {
+    if (!dialog || dialogBusy) return;
+    setDialogBusy(true);
+    try {
+      if (dialog.kind === 'add-category') {
+        const name = dialog.value.trim();
+        if (!name) return;
+        const r = await api.addResourceCategory(dialog.resourceKind, name);
+        if (r.success) {
+          setMsg(`已创建分类：${name}`);
+          setCategoryId(r.data.id);
+          setDialog(null);
+          await load();
+        } else {
+          setMsg(r.error || '分类创建失败');
+        }
+        return;
+      }
+      if (dialog.kind === 'rename-category') {
+        const name = dialog.value.trim();
+        if (!name || name === dialog.category.name) {
+          setDialog(null);
+          return;
+        }
+        const r = await api.renameResourceCategory(dialog.category.id, name);
+        if (r.success) setDialog(null);
+        setMsg(r.success ? '分类已重命名' : r.error || '分类重命名失败');
+        await load();
+        return;
+      }
+      if (dialog.kind === 'delete-category') {
+        const r = await api.deleteResourceCategory(dialog.category.id);
+        if (r.success) {
+          setDialog(null);
+          setMsg('分类已删除');
+          if (categoryId === dialog.category.id) setCategoryId('all');
+          await load();
+        } else {
+          setMsg(r.error || '分类删除失败');
+        }
+        return;
+      }
+      if (dialog.kind === 'rename-item') {
+        const title = dialog.value.trim();
+        if (!title || title === dialog.item.title) {
+          setDialog(null);
+          return;
+        }
+        const ok = await updateItem(dialog.item, { title });
+        if (ok) {
+          setMsg('资源已重命名');
+          setDialog(null);
+        }
+        return;
+      }
+      if (dialog.kind === 'delete-item') {
+        const r = await api.deleteResourceItem(dialog.item.id);
+        if (r.success) {
+          setItems((prev) => prev.filter((x) => x.id !== dialog.item.id));
+          setMsg('资源已删除');
+          setDialog(null);
+          window.dispatchEvent(new CustomEvent('penguin:resources-changed'));
+        } else {
+          setMsg(r.error || '资源删除失败');
+        }
+      }
+    } finally {
+      setDialogBusy(false);
     }
   };
 
@@ -381,7 +504,12 @@ export default function ResourceLibraryDrawer({ open, onClose, onInsertMaterial 
   };
 
   return (
-    <div className={`resource-library-drawer fixed top-0 right-0 z-50 h-screen w-[440px] max-w-[calc(100vw-18px)] shadow-2xl flex flex-col ${panelCls}`}>
+    <div
+      className={`resource-library-drawer fixed top-0 right-0 z-50 h-screen w-[440px] max-w-[calc(100vw-18px)] shadow-2xl flex flex-col ${panelCls}`}
+      onPointerDownCapture={stopResourceControlEvent}
+      onMouseDownCapture={stopResourceControlEvent}
+      onKeyDownCapture={stopResourceControlEvent}
+    >
       <div className={`h-[52px] px-4 py-3 flex items-center justify-between shrink-0 ${isPixel ? 'border-b-2 border-[var(--px-ink)] bg-[var(--px-muted)]' : isDark ? 'border-b border-white/10' : 'border-b border-black/10'}`}>
         <div className="flex items-center gap-2 min-w-0">
           <Library size={18} style={{ color: activeMeta.accent }} />
@@ -431,6 +559,26 @@ export default function ResourceLibraryDrawer({ open, onClose, onInsertMaterial 
           >
             <Star size={15} fill={favoriteOnly ? 'currentColor' : 'none'} />
           </button>
+          {canUpload && (
+            <>
+              <input
+                ref={uploadInputRef}
+                type="file"
+                accept={uploadAccept}
+                multiple
+                hidden
+                onChange={(e) => { void handleUploadFiles(e.target.files); e.target.value = ''; }}
+              />
+              <button
+                onClick={() => uploadInputRef.current?.click()}
+                disabled={uploading}
+                className={isPixel ? `t8-mini-icon-button px-btn px-btn--icon px-btn--yellow` : `t8-mini-icon-button h-9 w-9 p-0 rounded-md border flex items-center justify-center text-amber-300 border-amber-400/50 bg-amber-400/10 hover:bg-amber-400/20 disabled:opacity-50`}
+                title={`上传本地${KIND_META[kind].label}到资源库`}
+              >
+                {uploading ? <Loader2 size={15} className="animate-spin" /> : <Upload size={15} />}
+              </button>
+            </>
+          )}
         </div>
       </div>
 
@@ -439,6 +587,9 @@ export default function ResourceLibraryDrawer({ open, onClose, onInsertMaterial 
           <button
             type="button"
             data-resource-category-action="select"
+            onPointerDownCapture={stopResourceControlEvent}
+            onMouseDownCapture={stopResourceControlEvent}
+            onKeyDownCapture={stopResourceControlEvent}
             onPointerDown={stopResourceControlEvent}
             onMouseDown={stopResourceControlEvent}
             onClick={(event) => {
@@ -454,6 +605,9 @@ export default function ResourceLibraryDrawer({ open, onClose, onInsertMaterial 
               <button
                 type="button"
                 data-resource-category-action="select"
+                onPointerDownCapture={stopResourceControlEvent}
+                onMouseDownCapture={stopResourceControlEvent}
+                onKeyDownCapture={stopResourceControlEvent}
                 onPointerDown={stopResourceControlEvent}
                 onMouseDown={stopResourceControlEvent}
                 onClick={(event) => {
@@ -470,6 +624,9 @@ export default function ResourceLibraryDrawer({ open, onClose, onInsertMaterial 
                   <button
                     type="button"
                     data-resource-category-action="rename"
+                    onPointerDownCapture={stopResourceControlEvent}
+                    onMouseDownCapture={stopResourceControlEvent}
+                    onKeyDownCapture={stopResourceControlEvent}
                     onPointerDown={stopResourceControlEvent}
                     onMouseDown={stopResourceControlEvent}
                     onClick={(event) => {
@@ -485,6 +642,9 @@ export default function ResourceLibraryDrawer({ open, onClose, onInsertMaterial 
                   <button
                     type="button"
                     data-resource-category-action="delete"
+                    onPointerDownCapture={stopResourceControlEvent}
+                    onMouseDownCapture={stopResourceControlEvent}
+                    onKeyDownCapture={stopResourceControlEvent}
                     onPointerDown={stopResourceControlEvent}
                     onMouseDown={stopResourceControlEvent}
                     onClick={(event) => {
@@ -504,6 +664,9 @@ export default function ResourceLibraryDrawer({ open, onClose, onInsertMaterial 
           <button
             type="button"
             data-resource-category-action="add"
+            onPointerDownCapture={stopResourceControlEvent}
+            onMouseDownCapture={stopResourceControlEvent}
+            onKeyDownCapture={stopResourceControlEvent}
             onPointerDown={stopResourceControlEvent}
             onMouseDown={stopResourceControlEvent}
             onClick={(event) => {
@@ -745,6 +908,95 @@ export default function ResourceLibraryDrawer({ open, onClose, onInsertMaterial 
         >
           <img src={hoverPreview.src} alt={hoverPreview.title} draggable={false} />
           <div className="resource-card-image-hover-preview__title">{hoverPreview.title}</div>
+        </div>
+      )}
+      {dialog && (
+        <div
+          className="resource-library-dialog fixed inset-0 z-[10120] flex items-center justify-center bg-black/45 p-3 nodrag nopan"
+          role="dialog"
+          aria-modal="true"
+          aria-label={dialog.title}
+          onPointerDownCapture={stopResourceControlEvent}
+          onMouseDownCapture={stopResourceControlEvent}
+          onKeyDownCapture={stopResourceControlEvent}
+          onPointerDown={stopResourceControlEvent}
+          onMouseDown={stopResourceControlEvent}
+          onClick={(event) => {
+            stopResourceControlEvent(event);
+            closeDialog();
+          }}
+        >
+          <form
+            className={
+              isPixel
+                ? 'w-full max-w-sm border-2 border-[var(--px-ink)] bg-[var(--px-surface)] p-4 text-[var(--px-ink)] shadow-[6px_6px_0_var(--px-ink)]'
+                : `w-full max-w-sm rounded-lg border p-4 shadow-2xl ${
+                    isDark ? 'border-white/10 bg-zinc-950 text-white' : 'border-black/10 bg-white text-zinc-900'
+                  }`
+            }
+            onPointerDownCapture={stopResourceControlEvent}
+            onMouseDownCapture={stopResourceControlEvent}
+            onKeyDownCapture={stopResourceControlEvent}
+            onPointerDown={stopResourceControlEvent}
+            onMouseDown={stopResourceControlEvent}
+            onClick={stopResourceControlEvent}
+            onSubmit={(event) => {
+              event.preventDefault();
+              void submitDialog();
+            }}
+          >
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <div className="min-w-0 text-sm font-semibold">{dialog.title}</div>
+              <button
+                type="button"
+                onClick={closeDialog}
+                disabled={dialogBusy}
+                className={isPixel ? 't8-mini-icon-button px-btn px-btn--icon px-btn--ghost' : `t8-mini-icon-button h-8 w-8 rounded-md ${isDark ? 'hover:bg-white/10' : 'hover:bg-black/5'} disabled:opacity-50`}
+                title="关闭"
+              >
+                <X size={14} />
+              </button>
+            </div>
+            {dialogHasValue(dialog) ? (
+              <input
+                ref={dialogInputRef}
+                value={dialog.value}
+                onChange={(event) => updateDialogValue(event.target.value)}
+                disabled={dialogBusy}
+                className={`${inputCls} w-full`}
+              />
+            ) : (
+              <div className={`text-sm leading-6 ${isPixel ? 'text-[var(--px-ink)]' : isDark ? 'text-white/75' : 'text-zinc-700'}`}>
+                {dialog.message}
+              </div>
+            )}
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={closeDialog}
+                disabled={dialogBusy}
+                className={isPixel ? 'px-btn px-btn--sm px-btn--ghost' : `h-8 rounded-md border px-3 text-xs ${isDark ? 'border-white/10 hover:bg-white/10' : 'border-black/10 hover:bg-black/5'} disabled:opacity-50`}
+              >
+                取消
+              </button>
+              <button
+                type="submit"
+                disabled={dialogBusy || (dialogHasValue(dialog) && dialog.value.trim().length === 0)}
+                className={
+                  isPixel
+                    ? 'px-btn px-btn--sm px-btn--yellow'
+                    : `h-8 rounded-md px-3 text-xs font-semibold disabled:opacity-50 ${
+                        dialog.kind === 'delete-category' || dialog.kind === 'delete-item'
+                          ? 'bg-red-500 text-white hover:bg-red-400'
+                          : 'text-zinc-950'
+                      }`
+                }
+                style={!isPixel && dialog.kind !== 'delete-category' && dialog.kind !== 'delete-item' ? { background: activeMeta.accent } : undefined}
+              >
+                {dialogBusy ? '处理中...' : dialog.kind === 'delete-category' || dialog.kind === 'delete-item' ? '删除' : '确定'}
+              </button>
+            </div>
+          </form>
         </div>
       )}
     </div>

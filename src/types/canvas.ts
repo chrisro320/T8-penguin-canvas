@@ -11,6 +11,7 @@ export type NodeType =
   | 'video'
   | 'seedance'
   | 'director-storyboard'
+  | 'timeline-director'
   | 'audio'
   | 'llm'
   | 'runninghub'
@@ -353,6 +354,8 @@ export interface CanvasData {
   viewport: { x: number; y: number; zoom: number };
   nextNodeSerialId?: number;
   creativeDesk?: CreativeDeskState;
+  // 放置栏(右上角素材暂存浮层)状态;旧画布无此字段 → load 时 fallback 全量派生
+  placementShelfItems?: any[];
 }
 
 // API Key 设置(对应后端 settings)

@@ -236,6 +236,9 @@ router.put('/:id', (req, res) => {
   if (Object.prototype.hasOwnProperty.call(incoming || {}, 'creativeDesk')) {
     persisted.creativeDesk = sanitizeCreativeDeskState(incoming.creativeDesk);
   }
+  if (Array.isArray(incoming?.placementShelfItems)) {
+    persisted.placementShelfItems = incoming.placementShelfItems;
+  }
   atomicWriteJson(file, persisted);
   // 更新列表元数据
   const list = loadCanvasList();
@@ -288,6 +291,9 @@ router.post('/:id/auto-save', (req, res) => {
     };
     if (Object.prototype.hasOwnProperty.call(incoming || {}, 'creativeDesk')) {
       payload.creativeDesk = sanitizeCreativeDeskState(incoming.creativeDesk);
+    }
+    if (Array.isArray(incoming?.placementShelfItems)) {
+      payload.placementShelfItems = incoming.placementShelfItems;
     }
 
     atomicWriteJson(target, payload);

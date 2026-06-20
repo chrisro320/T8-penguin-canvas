@@ -171,6 +171,7 @@ const LLMNode = lazyCanvasNode(() => import('./nodes/LLMNode'), 'LLMNode');
 const VideoNode = lazyCanvasNode(() => import('./nodes/VideoNode'), 'VideoNode');
 const SeedanceNode = lazyCanvasNode(() => import('./nodes/SeedanceNode'), 'SeedanceNode');
 const DirectorStoryboardNode = lazyCanvasNode(() => import('./nodes/DirectorStoryboardNode'), 'DirectorStoryboardNode');
+const TimelineDirectorNode = lazyCanvasNode(() => import('./nodes/TimelineDirectorNode'), 'TimelineDirectorNode');
 const AudioNode = lazyCanvasNode(() => import('./nodes/AudioNode'), 'AudioNode');
 const RunningHubNode = lazyCanvasNode(() => import('./nodes/RunningHubNode'), 'RunningHubNode');
 const RhConfigNode = lazyCanvasNode(() => import('./nodes/RhConfigNode'), 'RhConfigNode');
@@ -236,6 +237,7 @@ const SPECIFIC_NODES: Record<string, any> = {
   video: VideoNode,
   seedance: SeedanceNode, // 完全对齐 gpt-image-2-web Seedance2.0(独立 /seedance/v3 路径)
   'director-storyboard': DirectorStoryboardNode,
+  'timeline-director': TimelineDirectorNode,
   audio: AudioNode,
   llm: LLMNode,
   runninghub: RunningHubNode,
@@ -430,6 +432,15 @@ const INITIAL_DATA: Record<string, Record<string, any>> = {
     maxPoll: 360,
     pollInt: 10,
     frameMode: 'auto',
+  },
+  'timeline-director': {
+    providerSource: 'external',
+    blocks: [],
+    globalStyle: '',
+    generateAudio: true,
+    seed: -1,
+    llmMode: 'segment',
+    status: 'idle',
   },
   'director-storyboard': {
     model: 'doubao-seedance-2-0-fast-260128',
@@ -1982,11 +1993,10 @@ function CanvasInner({ onAddNodeRef, onInsertWorkflowRef }: CanvasInnerProps) {
   const memoPanOnDrag = useMemo(() => (canvasPanLocked ? false : [...CANVAS_PAN_MOUSE_BUTTONS]), [canvasPanLocked]);
   const [placementShelfItems, setPlacementShelfItems] = useState<PlacementShelfItem[]>([]);
   const [placementShelfOpen, setPlacementShelfOpen] = useState(false);
-  const placementShelfClearedCanvasIdsRef = useRef<Set<string>>(new Set());
   const [loaded, setLoaded] = useState(false);
   const [loadedCanvasId, setLoadedCanvasId] = useState<string | null>(null);
   const saveTimersByCanvasRef = useRef<Map<string, number>>(new Map());
-  const pendingSaveByCanvasRef = useRef<Map<string, { nodes: Node[]; edges: Edge[]; creativeDesk: CreativeDeskState; snapshot: string; nextNodeSerialId: number }>>(new Map());
+  const pendingSaveByCanvasRef = useRef<Map<string, { nodes: Node[]; edges: Edge[]; creativeDesk: CreativeDeskState; snapshot: string; nextNodeSerialId: number; placementShelfItems?: PlacementShelfItem[] }>>(new Map());
   const lastSavedByCanvasRef = useRef<Map<string, string>>(new Map());
   const lastSavedNodeCountByCanvasRef = useRef<Map<string, number>>(new Map());
   const nextNodeSerialIdRef = useRef(1);
@@ -2224,7 +2234,6 @@ function CanvasInner({ onAddNodeRef, onInsertWorkflowRef }: CanvasInnerProps) {
   }, []);
 
   const clearPlacementShelf = useCallback(() => {
-    if (activeId) placementShelfClearedCanvasIdsRef.current.add(activeId);
     setPlacementShelfItems([]);
     setPlacementShelfOpen(false);
     logBus.success('已清空放置栏', '放置栏');
@@ -2419,7 +2428,11 @@ function CanvasInner({ onAddNodeRef, onInsertWorkflowRef }: CanvasInnerProps) {
         const baselineNextNodeSerialId = normalized.changed
           ? savedNextNodeSerialId || 1
           : normalized.nextNodeSerialId;
-        setPlacementShelfItems(placementShelfClearedCanvasIdsRef.current.has(requestedCanvasId) ? [] : placementShelfItemsFromCanvasNodes(fixedNs, '画布'));
+        const shelfFromData = Array.isArray(data.placementShelfItems)
+          ? data.placementShelfItems.filter((it: any) => fixedNs.some((n) => n.id === it.nodeId))
+          : undefined;
+        const shelfFromPending = pendingSave?.placementShelfItems;
+        setPlacementShelfItems(shelfFromPending ?? shelfFromData ?? placementShelfItemsFromCanvasNodes(fixedNs, '画布'));
         setPlacementShelfOpen(false);
         lastSavedByCanvasRef.current.set(requestedCanvasId, JSON.stringify({
           nodes: baselineNodes,
@@ -2515,7 +2528,7 @@ function CanvasInner({ onAddNodeRef, onInsertWorkflowRef }: CanvasInnerProps) {
       (ed) => ed.source !== BULK_PHANTOM_ID && ed.target !== BULK_PHANTOM_ID
     );
     const nextNodeSerialId = nextNodeSerialIdRef.current;
-    const snapshot = JSON.stringify({ nodes: persistNodes, edges: persistEdges, creativeDesk, nextNodeSerialId });
+    const snapshot = JSON.stringify({ nodes: persistNodes, edges: persistEdges, creativeDesk, nextNodeSerialId, placementShelfItems });
     const canvasIdForSave = activeId;
     const previousSnapshot = lastSavedByCanvasRef.current.get(canvasIdForSave) || '';
     if (snapshot === previousSnapshot) return;
@@ -2533,9 +2546,10 @@ function CanvasInner({ onAddNodeRef, onInsertWorkflowRef }: CanvasInnerProps) {
       creativeDesk,
       nextNodeSerialId,
       snapshot,
+      placementShelfItems,
     });
     const timer = window.setTimeout(async () => {
-      const payload = { nodes: persistNodes, edges: persistEdges, viewport: getViewport(), nextNodeSerialId, creativeDesk };
+      const payload = { nodes: persistNodes, edges: persistEdges, viewport: getViewport(), nextNodeSerialId, creativeDesk, placementShelfItems: placementShelfItems.filter((item) => !item.url.startsWith('data:')) };
       try {
         await api.saveCanvasData(canvasIdForSave, payload, { allowEmpty: allowEmptySave });
         api.autoSaveCanvasData(canvasIdForSave, payload).catch((e) => {
@@ -2563,7 +2577,7 @@ function CanvasInner({ onAddNodeRef, onInsertWorkflowRef }: CanvasInnerProps) {
       }
     }, 800);
     saveTimersByCanvasRef.current.set(canvasIdForSave, timer);
-  }, [nodes, edges, creativeDesk, activeId, loaded, loadedCanvasId, getViewport, dragSaveTick]);
+  }, [nodes, edges, creativeDesk, activeId, loaded, loadedCanvasId, getViewport, dragSaveTick, placementShelfItems]);
 
   const getCreativeDeskCenter = useCallback(() => {
     const flowEl = document.querySelector('.react-flow') as HTMLElement | null;
@@ -6662,7 +6676,7 @@ function CanvasInner({ onAddNodeRef, onInsertWorkflowRef }: CanvasInnerProps) {
       if ('isPrimary' in event && event.isPrimary === false) return false;
       const target = event.target instanceof HTMLElement ? event.target : null;
       if (!target) return false;
-      if (target.closest('[data-director-timeline-resize-handle]')) return false;
+      if (target.closest('[data-director-timeline-resize-handle], [data-timeline-resize-handle]')) return false;
       const button = target.closest('button, [role="button"]') as HTMLElement | null;
       if (!button) return false;
       if (button.closest('[data-node-action-bar]')) return false;

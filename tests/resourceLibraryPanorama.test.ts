@@ -246,5 +246,17 @@ test('resource library category controls are isolated from canvas drag gestures'
   assert.match(drawer, /data-resource-category-action="rename"/);
   assert.match(drawer, /data-resource-category-action="select"/);
   assert.match(drawer, /stopResourceControlEvent/);
+  assert.match(drawer, /onPointerDownCapture=\{stopResourceControlEvent\}/);
+  assert.match(drawer, /onMouseDownCapture=\{stopResourceControlEvent\}/);
+  assert.match(drawer, /onKeyDownCapture=\{stopResourceControlEvent\}/);
   assert.match(drawer, /nodrag nopan/);
+});
+
+test('resource library drawer does not use unsupported native prompt dialogs', () => {
+  const drawer = readFileSync(new URL('../src/components/ResourceLibraryDrawer.tsx', import.meta.url), 'utf8');
+
+  assert.doesNotMatch(drawer, /window\.(prompt|confirm)\(/);
+  assert.match(drawer, /resource-library-dialog/);
+  assert.match(drawer, /resource-library-dialog[\s\S]*onPointerDownCapture=\{stopResourceControlEvent\}/);
+  assert.match(drawer, /resource-library-dialog[\s\S]*onKeyDownCapture=\{stopResourceControlEvent\}/);
 });

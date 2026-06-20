@@ -473,3 +473,91 @@ test('Jimeng Seedance multiframe keeps up to 9 image references', async () => {
   assert.equal(args.filter((arg: string) => arg.startsWith('--transition-duration=')).length, 8);
   assert.deepEqual(result.videoUrls, ['/files/output/frames.mp4']);
 });
+
+test('Jimeng Seedance multiframe keeps per-segment timeline prompts durations and @ image names', async () => {
+  const commands: any[] = [];
+  const provider = {
+    id: 'jimeng-cli',
+    protocol: 'jimeng-cli',
+    videoModels: ['seedance2.0fast_vip'],
+    jimengConfig: { executablePath: 'dreamina', pollSeconds: 20 },
+  };
+
+  const result = await jimengCli.generateVideo(provider, {
+    prompt: 'fallback timeline prompt',
+    providerModel: 'seedance2.0fast_vip',
+    duration: 9,
+    resolution: '720p',
+    images: ['C:\\tmp\\hero.png', 'C:\\tmp\\env.png', 'C:\\tmp\\story.png'],
+    providerParams: {
+      frameMode: 'multiframe',
+      transitionPrompts: [
+        '@女主A -> @大厅720\n时长：0.5秒\n女主转身',
+        '@大厅720 -> @故事板03\n时长：8秒\n镜头推进',
+      ],
+      transitionDurations: [0.2, 9.3],
+    },
+  }, {
+    resolveLocalMedia: async (value: string) => value,
+    runCli: async (command: string, args: string[]) => {
+      commands.push({ command, args });
+      return { videos: ['C:\\tmp\\timeline.mp4'], submit_id: 'vid-timeline' };
+    },
+    storeOutput: async (value: string) => `/files/output/${value.split('\\').pop()}`,
+  });
+
+  const args = commands[0].args;
+  assert.equal(result.ok, true);
+  assert.equal(args[0], 'multiframe2video');
+  assert.equal(args.filter((arg: string) => arg.startsWith('--transition-prompt=')).length, 2);
+  assert.ok(args.includes('--transition-prompt=@女主A -> @大厅720\n时长：0.5秒\n女主转身'));
+  assert.ok(args.includes('--transition-prompt=@大厅720 -> @故事板03\n时长：8秒\n镜头推进'));
+  assert.equal(args.some((arg: string) => /关键帧图|图片定位|时长约束|描述词/.test(String(arg))), false);
+  assert.ok(args.includes('--transition-duration=0.5'));
+  assert.ok(args.includes('--transition-duration=8'));
+  assert.equal(args.some((arg: string) => String(arg).includes('C:\\tmp\\hero.png') && String(arg).includes('@女主A')), false);
+  assert.deepEqual(result.videoUrls, ['/files/output/timeline.mp4']);
+});
+
+test('Jimeng Seedance timeline multiframe keeps video and audio references without switching to multimodal mode', async () => {
+  const commands: any[] = [];
+  const provider = {
+    id: 'jimeng-cli',
+    protocol: 'jimeng-cli',
+    videoModels: ['seedance2.0fast_vip'],
+    jimengConfig: { executablePath: 'dreamina', pollSeconds: 20 },
+  };
+
+  const result = await jimengCli.generateVideo(provider, {
+    prompt: 'timeline with global references',
+    providerModel: 'seedance2.0fast_vip',
+    duration: 6,
+    resolution: '720p',
+    images: ['C:\\tmp\\frame-a.png', 'C:\\tmp\\frame-b.png', 'C:\\tmp\\frame-c.png'],
+    videos: ['C:\\tmp\\motion-ref.mp4'],
+    audios: ['C:\\tmp\\voice-ref.wav'],
+    providerParams: {
+      frameMode: 'multiframe',
+      transitionPrompts: [
+        '@A -> @B\n时长：3秒\n转身',
+        '@B -> @C\n时长：3秒\n走远',
+      ],
+      transitionDurations: [3, 3],
+    },
+  }, {
+    resolveLocalMedia: async (value: string) => value,
+    runCli: async (command: string, args: string[]) => {
+      commands.push({ command, args });
+      return { videos: ['C:\\tmp\\timeline-refs.mp4'], submit_id: 'vid-timeline-refs' };
+    },
+    storeOutput: async (value: string) => `/files/output/${value.split('\\').pop()}`,
+  });
+
+  const args = commands[0].args;
+  assert.equal(result.ok, true);
+  assert.equal(args[0], 'multiframe2video');
+  assert.ok(args.includes('--video=C:\\tmp\\motion-ref.mp4'));
+  assert.ok(args.includes('--audio=C:\\tmp\\voice-ref.wav'));
+  assert.equal(args.some((arg: string) => arg === 'multimodal2video'), false);
+  assert.deepEqual(result.videoUrls, ['/files/output/timeline-refs.mp4']);
+});

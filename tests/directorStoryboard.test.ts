@@ -259,11 +259,12 @@ test('director storyboard exposes the same zhenzhen group binding addon used by 
 test('director storyboard node keeps ports visible and makes timeline resizing draggable', () => {
   const node = read('../src/components/nodes/DirectorStoryboardNode.tsx');
   const canvas = read('../src/components/Canvas.tsx');
+  const resizeHandleGuard = canvas.match(/target\.closest\('([^']*data-director-timeline-resize-handle[^']*)'\)/)?.[1] || '';
 
   assert.match(node, /className=\{`relative w-\[460px\] overflow-visible/);
   assert.match(node, /className="director-storyboard-port[^"]*!h-4[^"]*!w-4/);
   assert.match(node, /data-director-timeline-resize-handle/);
-  assert.match(canvas, /closest\('\[data-director-timeline-resize-handle\]'\)/);
+  assert.match(resizeHandleGuard, /\[data-director-timeline-resize-handle\]/);
   assert.match(node, /onPointerDownCapture=\{\(event\) => beginDurationResize\(event, shot\)\}/);
   assert.match(node, /onPointerDown=\{\(event\) => beginDurationResize\(event, shot\)\}/);
   assert.match(node, /onPointerMoveCapture=\{moveDurationResize\}/);
@@ -278,6 +279,16 @@ test('director storyboard node keeps ports visible and makes timeline resizing d
   assert.match(node, /onPointerDownCapture=\{\(event\) => beginBridgeSeparatorInteraction\(event, shot, bridge\.id\)\}/);
   assert.match(node, /onMouseDownCapture=\{\(event\) => beginBridgeSeparatorInteraction\(event, shot, bridge\.id\)\}/);
   assert.match(node, /setActiveBridgeId\(bridgeId\)/);
+});
+
+test('timeline director resize handles bypass the global node button down guard', () => {
+  const node = read('../src/components/nodes/TimelineDirectorNode.tsx');
+  const canvas = read('../src/components/Canvas.tsx');
+  const resizeHandleGuard = canvas.match(/target\.closest\('([^']*data-director-timeline-resize-handle[^']*)'\)/)?.[1] || '';
+
+  assert.match(node, /data-timeline-resize-handle/);
+  assert.match(resizeHandleGuard, /\[data-director-timeline-resize-handle\]/);
+  assert.match(resizeHandleGuard, /\[data-timeline-resize-handle\]/);
 });
 
 test('director storyboard bridge UI is edited per shot pair instead of a global generate-all switch', () => {

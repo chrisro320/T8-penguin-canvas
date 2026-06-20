@@ -605,6 +605,17 @@ function resolveLocalSource(url, root, db) {
 }
 
 async function readSource(url, root, db) {
+  // 本地上传:前端把文件转成 data:URL 传进来
+  const dataMatch = /^data:([^;,]*?)(;base64)?,([\s\S]*)$/i.exec(url);
+  if (dataMatch) {
+    const mime = dataMatch[1] || 'application/octet-stream';
+    const buffer = dataMatch[2]
+      ? Buffer.from(dataMatch[3], 'base64')
+      : Buffer.from(decodeURIComponent(dataMatch[3]), 'utf-8');
+    const ext = extFromMime(mime) || 'bin';
+    return { buffer, originalName: `upload_${Date.now()}.${ext}`, mime };
+  }
+
   const local = resolveLocalSource(url, root, db);
   if (local) {
     if (!fs.existsSync(local.filePath)) throw new Error('源文件不存在');
@@ -784,7 +795,7 @@ router.get('/items', (req, res) => {
   }
 });
 
-router.post('/items/add', express.json({ limit: '4mb' }), async (req, res) => {
+router.post('/items/add', express.json({ limit: '128mb' }), async (req, res) => {
   try {
     const url = safeText(req.body?.url, '');
     if (!url) return res.status(400).json({ success: false, error: '缺少 url' });

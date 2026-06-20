@@ -698,7 +698,36 @@ async function generateVideo(provider, input = {}, options = {}) {
   const tempPaths = [];
   const mediaOptions = { ...options, tempPaths };
   try {
-    if (videos.length || audios.length || (mode === 'omni' && refs.length)) {
+    if (mode === 'multiframe' && refs.length >= 2) {
+      const paths = [];
+      for (const ref of refs.slice(0, 9)) paths.push(await resolveLocalMedia(ref, 'image', provider, mediaOptions));
+      const videoPaths = await resolveLocalMediaList(videos.slice(0, 3), 'video', provider, mediaOptions);
+      const audioPaths = await resolveLocalMediaList(audios.slice(0, 3), 'audio', provider, mediaOptions);
+      args.push('multiframe2video', `--images=${paths.join(',')}`);
+      for (const p of videoPaths) args.push(`--video=${p}`);
+      for (const p of audioPaths) args.push(`--audio=${p}`);
+      const segCount = paths.length - 1;
+      // 时间轴导演节点传入每段独立 transitionPrompts/Durations(无则旧行为:重复单 prompt + 平均分)
+      const pp = input.providerParams && typeof input.providerParams === 'object' ? input.providerParams : {};
+      const tPrompts = Array.isArray(pp.transitionPrompts) ? pp.transitionPrompts : null;
+      const tDurations = Array.isArray(pp.transitionDurations) ? pp.transitionDurations : null;
+      const segPrompt = (i) => {
+        const t = tPrompts && typeof tPrompts[i] === 'string' && tPrompts[i].trim() ? tPrompts[i].trim() : prompt;
+        return t;
+      };
+      const segDuration = (i) => {
+        const raw = tDurations && Number.isFinite(Number(tDurations[i])) ? Number(tDurations[i]) : transitionDuration(duration, segCount);
+        return Math.max(0.5, Math.min(8, raw));
+      };
+      if (paths.length === 2) {
+        args.push(`--prompt=${segPrompt(0)}`, `--duration=${segDuration(0)}`);
+      } else {
+        for (let i = 0; i < segCount; i += 1) {
+          args.push(`--transition-prompt=${segPrompt(i)}`);
+          args.push(`--transition-duration=${segDuration(i)}`);
+        }
+      }
+    } else if (videos.length || audios.length || (mode === 'omni' && refs.length)) {
       const imagePaths = await resolveLocalMediaList(refs.slice(0, 9), 'image', provider, mediaOptions);
       const videoPaths = await resolveLocalMediaList(videos.slice(0, 3), 'video', provider, mediaOptions);
       const audioPaths = await resolveLocalMediaList(audios.slice(0, 3), 'audio', provider, mediaOptions);
@@ -716,19 +745,6 @@ async function generateVideo(provider, input = {}, options = {}) {
       const lastPath = await resolveLocalMedia(refs[1], 'image', provider, mediaOptions);
       args.push('frames2video', `--first=${firstPath}`, `--last=${lastPath}`, `--prompt=${prompt}`, `--duration=${duration}`);
       appendVideoModelResolutionArgs(args, 'frames2video', model, input.resolution);
-    } else if (mode === 'multiframe' && refs.length >= 2) {
-      const paths = [];
-      for (const ref of refs.slice(0, 9)) paths.push(await resolveLocalMedia(ref, 'image', provider, mediaOptions));
-      args.push('multiframe2video', `--images=${paths.join(',')}`);
-      if (paths.length === 2) {
-        args.push(`--prompt=${prompt}`, `--duration=${transitionDuration(duration, 1)}`);
-      } else {
-        const each = transitionDuration(duration, paths.length - 1);
-        for (let i = 0; i < paths.length - 1; i += 1) {
-          args.push(`--transition-prompt=${prompt}`);
-          args.push(`--transition-duration=${each}`);
-        }
-      }
     } else if (refs.length >= 1) {
       const refPath = await resolveLocalMedia(refs[0], 'image', provider, mediaOptions);
       args.push('image2video', `--image=${refPath}`, `--prompt=${prompt}`, `--duration=${duration}`);
