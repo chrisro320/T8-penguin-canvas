@@ -65,3 +65,9 @@ if [ "$DO_INSTALL" = 1 ]; then
 else
   echo "如需安装: sudo dpkg -i \"$DEB\""
 fi
+
+# 更新成功后刷新异地备份(rebase 改写了历史,故 force-with-lease)。myfork 不存在则跳过。
+if git remote get-url myfork >/dev/null 2>&1; then
+  echo "==> 刷新备份 myfork/$BRANCH"
+  git push --force-with-lease myfork "$BRANCH" || echo "  (备份推送失败,可稍后手动 git push --force-with-lease myfork $BRANCH)"
+fi
