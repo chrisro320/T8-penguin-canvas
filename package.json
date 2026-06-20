@@ -41,6 +41,7 @@
     "dist:dir": "npm run prepack:enc && npm run prepack:runtimes && electron-builder --win --x64 --dir && node electron/_post_build.cjs",
     "dist": "npm run prepack:enc && npm run prepack:runtimes && electron-builder --win --x64 && node electron/_post_build.cjs",
     "dist:linux:dir": "vite build && npm run encrypt && electron-builder --linux --x64 --dir",
+    "dist:linux": "vite build && npm run encrypt && electron-builder --linux deb --x64",
     "dist:release": "node scripts/dist-release.cjs",
     "release:github": "node scripts/release-github.cjs",
     "release:verify": "node scripts/verify-github-release.cjs",
