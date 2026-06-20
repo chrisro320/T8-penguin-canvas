@@ -42,7 +42,7 @@ export const PANORAMA_RATIO_OPTIONS: Array<{ id: PanoramaRatioId; label: string 
 
 export type PanoramaGenerationMode = 'text' | 'image';
 export type PanoramaPanelMode = 'preview' | PanoramaGenerationMode;
-export type PanoramaSizeLevel = '1K' | '2K';
+export type PanoramaSizeLevel = '1K' | '2K' | '4K';
 
 export interface PanoramaGenerationHistoryItem {
   url: string;
@@ -573,7 +573,7 @@ export interface PanoramaImageQuality {
 export const PANORAMA_FIXED_PROMPT =
   '将参考图生成一个720度的全景VR图，左右边缘100%像素级无缝衔接，可无限循环拼接；上下极点（南北极）自然过渡，无明显断层或拉伸，场景一致性，以及场景的逻辑性，封闭场景需要有门。';
 
-export const PANORAMA_SIZE_LEVELS: PanoramaSizeLevel[] = ['1K', '2K'];
+export const PANORAMA_SIZE_LEVELS: PanoramaSizeLevel[] = ['1K', '2K', '4K'];
 export const PANORAMA_PROMPT_TEMPLATES = ['室内展厅', '科幻基地', '古风庭院', '自然峡谷', '游戏关卡', '产品展台'];
 export const PANORAMA_CAMERA_PRESETS: Array<{ id: string; label: string; yaw: number; pitch: number; fov: number }> = [
   { id: 'front', label: '正前', yaw: 0, pitch: 0, fov: 75 },
@@ -1658,7 +1658,9 @@ export function safePanoramaGenerationMode(value: unknown): PanoramaGenerationMo
 }
 
 export function safePanoramaSizeLevel(value: unknown): PanoramaSizeLevel {
-  return value === '2K' ? '2K' : '1K';
+  if (value === '4K') return '4K';
+  if (value === '2K') return '2K';
+  return '1K';
 }
 
 function cleanPanoramaText(value: unknown, max = 80) {
