@@ -1,4 +1,4 @@
-import type { SeedanceSubmitRequest } from '../services/generation';
+import type { GenerateExternalVideoRequest, SeedanceSubmitRequest } from '../services/generation';
 import type { MediaMention, MediaMentionKind } from '../components/nodes/mediaMentions';
 
 export type DirectorStoryboardFrameMode = 'auto' | 'first' | 'firstlast' | 'multiframe';
@@ -1021,6 +1021,70 @@ export function buildDirectorStoryboardOutputNodeData(item: DirectorStoryboardOu
     directTextSegments: text ? [text] : [],
     textSegments: text ? [text] : [],
     segments: text ? [text] : [],
+  };
+}
+
+// 外部视频供应商默认并发数(zhenzhen 路径不受限,仍 Promise.all 全并发)。
+// 中转商多有限速,2 路平衡速度与限流风险。
+export const EXTERNAL_VIDEO_CONCURRENCY = 2;
+
+// 简易并发闸(信号量)。runDirectorStoryboardJobs 本身全并发,外部供应商场景下
+// 把 runJob 用 acquire/release 包一层即可限制实际并发,无需改调度器签名。
+export function createSemaphore(limit: number) {
+  let active = 0;
+  const waiters: Array<() => void> = [];
+  const acquire = (): Promise<void> => {
+    if (active < limit) {
+      active += 1;
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => {
+      waiters.push(() => {
+        active += 1;
+        resolve();
+      });
+    });
+  };
+  const release = () => {
+    active -= 1;
+    const next = waiters.shift();
+    if (next) next();
+  };
+  return { acquire, release };
+}
+
+// 把贞贞 seedance 的 SeedanceSubmitRequest 映射成外部供应商的 GenerateExternalVideoRequest。
+// firstFrame/lastFrame/refImages 合并进 images 数组(即梦 adapter 读 images[0]/[1] 做首尾帧);
+// frameMode==='firstlast' 且 images>=2 时注入 providerParams.frameMode,触发即梦 frames2video。
+export function buildExternalVideoRequest(
+  payload: SeedanceSubmitRequest,
+  selection: { providerId: string; providerModel?: string; frameMode?: DirectorStoryboardFrameMode },
+): GenerateExternalVideoRequest {
+  const frames: string[] = [];
+  if (payload.firstFrame) frames.push(payload.firstFrame);
+  if (payload.lastFrame) frames.push(payload.lastFrame);
+  const refs = Array.isArray(payload.refImages) ? payload.refImages : [];
+  const images = [...frames, ...refs].filter((value): value is string => Boolean(value));
+  // 把导演台 frameMode 完整映射给即梦 providerParams.frameMode,触发对应子命令:
+  // first→image2video / firstlast→frames2video / multiframe→multiframe2video;
+  // auto 留空走 omni(multimodal2video,多模态参考图/视频/音频)。
+  const providerParams: Record<string, any> = { ...(payload.providerParams || {}) };
+  if (selection.frameMode && selection.frameMode !== 'auto') {
+    providerParams.frameMode = selection.frameMode;
+  }
+  return {
+    providerId: selection.providerId,
+    providerModel: selection.providerModel,
+    model: payload.model,
+    prompt: payload.prompt,
+    aspect_ratio: payload.ratio,
+    duration: payload.duration,
+    resolution: payload.resolution,
+    seed: payload.seed,
+    images: images.length ? images : undefined,
+    videos: payload.videos,
+    audios: payload.audios,
+    providerParams,
   };
 }
 

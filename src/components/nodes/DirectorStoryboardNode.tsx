@@ -22,6 +22,7 @@ import {
   X,
 } from 'lucide-react';
 import {
+  generateExternalVideo,
   querySeedance,
   submitSeedance,
   uploadFile,
@@ -30,6 +31,12 @@ import * as api from '../../services/api';
 import { useRunTrigger } from '../../hooks/useRunTrigger';
 import { useMaterialDropTarget } from '../../hooks/useMaterialDropTarget';
 import { useThemeStore } from '../../stores/theme';
+import { useApiKeysStore } from '../../stores/apiKeys';
+import {
+  advancedProviderModelOptions,
+  advancedProvidersForNode,
+  resolveAdvancedProviderSelection,
+} from '../../utils/advancedProviders';
 import { logBus } from '../../stores/logs';
 import { taskCompletionSound } from '../../stores/taskCompletionSound';
 import { useDragMaterialStore, type MaterialPayload } from '../../stores/dragMaterial';
@@ -49,6 +56,9 @@ import {
   buildDirectorStoryboardReferenceOrder,
   buildDirectorStoryboardRunPlan,
   buildDirectorStoryboardShotInputPatch,
+  buildExternalVideoRequest,
+  createSemaphore,
+  EXTERNAL_VIDEO_CONCURRENCY,
   calculateDirectorTimelineDragDuration,
   DIRECTOR_STORYBOARD_MAX_DURATION_SEC,
   DIRECTOR_STORYBOARD_MIN_DURATION_SEC,
@@ -59,6 +69,7 @@ import {
   sanitizeDirectorStoryboardBridges,
   sanitizeDirectorStoryboardShots,
   type DirectorBridgePromptPreset,
+  type DirectorStoryboardFrameMode,
   type DirectorStoryboardBridge,
   type DirectorStoryboardJob,
   type DirectorStoryboardJobResult,
@@ -343,6 +354,24 @@ const DirectorStoryboardNode = ({ id, data, selected }: NodeProps) => {
   const watermark = d.watermark === true;
   const webSearch = d.webSearch === true;
   const seed = typeof d.seed === 'number' ? d.seed : -1;
+
+  const advancedProviders = useApiKeysStore((s) => s.settings.advancedProviders);
+  const videoAdvancedProviders = useMemo(
+    () => advancedProvidersForNode(advancedProviders, 'video'),
+    [advancedProviders],
+  );
+  const providerSelection = useMemo(
+    () => resolveAdvancedProviderSelection(advancedProviders, 'video', {
+      providerSource: d?.providerSource,
+      providerId: d?.providerId,
+      providerModel: d?.providerModel,
+    }),
+    [advancedProviders, d?.providerSource, d?.providerId, d?.providerModel],
+  );
+  const isExternalVideo = providerSelection.available && providerSelection.providerSource !== 'zhenzhen';
+  const externalVideoModelOptions = providerSelection.provider
+    ? advancedProviderModelOptions(providerSelection.provider, 'video')
+    : [];
   const bridgePanelEnabled = d.directorBridgePanelEnabled === true;
   const providerParams = useMemo(
     () => ((d?.providerParams && typeof d.providerParams === 'object') ? d.providerParams : {}),
@@ -1167,6 +1196,35 @@ const DirectorStoryboardNode = ({ id, data, selected }: NodeProps) => {
     logBus.info(`导演分镜台重新获取：已整理 ${items.length} 个视频输出`, src);
   };
 
+  const runExternalVideoJob = async (job: DirectorStoryboardJob, signal?: AbortSignal): Promise<string> => {
+    const providerId = providerSelection.providerId;
+    const providerModel = providerSelection.providerModel || externalVideoModelOptions[0] || undefined;
+    const frameMode: DirectorStoryboardFrameMode =
+      job.kind === 'bridge' || !!job.payload.lastFrame ? 'firstlast' : job.payload.firstFrame ? 'first' : 'auto';
+    const req = buildExternalVideoRequest(job.payload, { providerId, providerModel, frameMode });
+    setJobPatch(job, { status: 'submitting', error: null, progress: '外部生成中' });
+    const startedAt = Date.now();
+    const timer = setInterval(() => {
+      if (signal?.aborted) return;
+      const elapsedSec = Math.floor((Date.now() - startedAt) / 1000);
+      const mm = String(Math.floor(elapsedSec / 60)).padStart(2, '0');
+      const ss = String(elapsedSec % 60).padStart(2, '0');
+      setJobPatch(job, { status: 'polling', progress: `外部生成中 ${mm}:${ss}` });
+    }, 1000);
+    try {
+      if (signal?.aborted) throw new Error('用户已停止');
+      const res = await generateExternalVideo(req);
+      const videoUrl = res.videoUrls?.[0];
+      if (!videoUrl) {
+        throw new Error(res.taskId ? `外部任务未出片(taskId=${res.taskId})` : '外部供应商未返回视频');
+      }
+      logBus.success(`${job.title} 完成 → ${videoUrl}`, src);
+      return videoUrl;
+    } finally {
+      clearInterval(timer);
+    }
+  };
+
   const pollJob = async (job: DirectorStoryboardJob, signal?: AbortSignal): Promise<string> => {
     if (!String(job.payload.prompt || '').trim()) {
       throw new Error('这个分镜没有提示词');
@@ -1176,6 +1234,9 @@ const DirectorStoryboardNode = ({ id, data, selected }: NodeProps) => {
       `提交${job.kind === 'bridge' ? '桥接' : '分镜'} ${job.title}: ${job.payload.duration || 5}s ${job.payload.ratio || ratio} ${job.payload.resolution || resolution}`,
       src,
     );
+    if (isExternalVideo) {
+      return runExternalVideoJob(job, signal);
+    }
     setJobPatch(job, { status: 'submitting', error: null, progress: '提交中' });
     const submitted = await submitSeedance(job.payload);
     setJobPatch(job, { status: 'polling', taskId: submitted.taskId, progress: '15%' });
@@ -1269,7 +1330,18 @@ const DirectorStoryboardNode = ({ id, data, selected }: NodeProps) => {
     };
 
     try {
-      const runResult = await runDirectorStoryboardJobs(plan, pollJob, {
+      const externalSemaphore = isExternalVideo ? createSemaphore(EXTERNAL_VIDEO_CONCURRENCY) : null;
+      const limitedPollJob: (job: DirectorStoryboardJob, signal?: AbortSignal) => Promise<string> = externalSemaphore
+        ? async (job: DirectorStoryboardJob, signal?: AbortSignal) => {
+            await externalSemaphore.acquire();
+            try {
+              return await pollJob(job, signal);
+            } finally {
+              externalSemaphore.release();
+            }
+          }
+        : pollJob;
+      const runResult = await runDirectorStoryboardJobs(plan, limitedPollJob, {
         signal: controller.signal,
         onJobComplete,
       });
@@ -1351,7 +1423,18 @@ const DirectorStoryboardNode = ({ id, data, selected }: NodeProps) => {
     };
 
     try {
-      const runResult = await runDirectorStoryboardJobs(plan, pollJob, {
+      const externalSemaphore = isExternalVideo ? createSemaphore(EXTERNAL_VIDEO_CONCURRENCY) : null;
+      const limitedPollJob: (job: DirectorStoryboardJob, signal?: AbortSignal) => Promise<string> = externalSemaphore
+        ? async (job: DirectorStoryboardJob, signal?: AbortSignal) => {
+            await externalSemaphore.acquire();
+            try {
+              return await pollJob(job, signal);
+            } finally {
+              externalSemaphore.release();
+            }
+          }
+        : pollJob;
+      const runResult = await runDirectorStoryboardJobs(plan, limitedPollJob, {
         signal: controller.signal,
         onJobComplete,
       });
@@ -1902,10 +1985,79 @@ const DirectorStoryboardNode = ({ id, data, selected }: NodeProps) => {
       </div>
 
       <div className="space-y-2 p-3">
+        {videoAdvancedProviders.length > 0 && (
+          <div className="rounded border border-white/10 bg-white/[0.03] p-2 space-y-2">
+            <button
+              type="button"
+              onClick={() => update({ advancedProviderOpen: !d?.advancedProviderOpen })}
+              className="w-full flex items-center justify-between text-[10px] font-semibold text-white/70 hover:text-white"
+            >
+              <span>高级来源</span>
+              <span>{isExternalVideo && providerSelection.provider ? providerSelection.provider.label : '默认贞贞工坊'}</span>
+            </button>
+            {d?.advancedProviderOpen && (
+              <div className="space-y-2">
+                <div>
+                  <label className="text-[10px] text-white/50 block mb-1">平台</label>
+                  <select
+                    value={isExternalVideo ? providerSelection.providerId : 'zhenzhen'}
+                    onChange={(e) => {
+                      const nextId = e.target.value;
+                      if (nextId === 'zhenzhen') {
+                        update({ providerSource: 'zhenzhen', providerId: '', providerModel: '' });
+                        return;
+                      }
+                      const provider = videoAdvancedProviders.find((item) => item.id === nextId);
+                      if (!provider) return;
+                      const nextModels = advancedProviderModelOptions(provider, 'video');
+                      update({
+                        providerSource: provider.protocol,
+                        providerId: provider.id,
+                        providerModel: nextModels[0] || '',
+                      });
+                    }}
+                    style={inputStyle}
+                    className="w-full rounded border px-2 py-1 text-[11px] outline-none"
+                  >
+                    <option value="zhenzhen" style={inputStyle}>贞贞工坊（默认）</option>
+                    {videoAdvancedProviders.map((provider) => (
+                      <option key={provider.id} value={provider.id} style={inputStyle}>{provider.label || provider.id}</option>
+                    ))}
+                  </select>
+                </div>
+                {isExternalVideo && providerSelection.provider && (
+                  <div>
+                    <label className="text-[10px] text-white/50 block mb-1">外部模型</label>
+                    <select
+                      value={providerSelection.providerModel || externalVideoModelOptions[0] || ''}
+                      onChange={(e) => update({ providerModel: e.target.value })}
+                      style={inputStyle}
+                      className="w-full rounded border px-2 py-1 text-[11px] outline-none"
+                    >
+                      {externalVideoModelOptions.map((m) => (
+                        <option key={m} value={m} style={inputStyle}>{m}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
         <div className="grid grid-cols-4 gap-1.5">
-          <select value={model} onChange={(event) => update({ model: event.target.value })} className="nodrag rounded border px-2 py-1 text-[11px] outline-none col-span-2" style={inputStyle}>
-            {MODEL_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
-          </select>
+          {isExternalVideo ? (
+            <div
+              className="nodrag rounded border px-2 py-1 text-[11px] col-span-2 flex items-center truncate"
+              style={{ ...inputStyle, opacity: 0.7 }}
+              title="已使用外部供应商模型（在上方「外部模型」选择）"
+            >
+              外部模型 · {providerSelection.providerModel || externalVideoModelOptions[0] || '未选'}
+            </div>
+          ) : (
+            <select value={model} onChange={(event) => update({ model: event.target.value })} className="nodrag rounded border px-2 py-1 text-[11px] outline-none col-span-2" style={inputStyle}>
+              {MODEL_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+            </select>
+          )}
           <select value={ratio} onChange={(event) => update({ ratio: event.target.value })} className="nodrag rounded border px-2 py-1 text-[11px] outline-none" style={inputStyle}>
             {RATIO_OPTIONS.map((item) => <option key={item} value={item}>{item}</option>)}
           </select>
@@ -1943,7 +2095,7 @@ const DirectorStoryboardNode = ({ id, data, selected }: NodeProps) => {
           data={d}
           update={update}
           context={{
-            providerSource: 'zhenzhen',
+            providerSource: isExternalVideo ? providerSelection.providerSource : 'zhenzhen',
             providerModel: model,
             model,
             apiModel: model,

@@ -350,6 +350,40 @@ async function pollExternalImageTask(provider, baseUrl, taskId, options = {}) {
   return { ok: false, error: '图像任务轮询超时(5 分钟)' };
 }
 
+async function pollExternalVideoTask(provider, baseUrl, taskId, options = {}) {
+  // 轮询端点 = 提交端点 + /{task_id}(对齐 t8star /v2/videos/generations/:tid 与中转 GET {base}/videos/generations/{id})。
+  const url = `${baseUrl}/videos/generations/${encodeURIComponent(taskId)}`;
+  const maxRetries = 400; // 400 × 3s = 20 分钟上限(视频比图像慢,给足)
+  const interval = 3000;
+  const FAILURE_STATUS = ['failed', 'failure', 'error', 'cancelled', 'canceled'];
+  for (let i = 0; i < maxRetries; i++) {
+    await new Promise((r) => setTimeout(r, interval));
+    let res;
+    try {
+      res = await fetchWithTimeout(url, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${provider.apiKey}` },
+        timeoutMs: options.timeoutMs,
+        fetchImpl: options.fetchImpl,
+      });
+    } catch (e) {
+      if (e?.name === 'AbortError') continue; // 单次轮询超时,继续重试
+      throw e;
+    }
+    const raw = await responseJson(res);
+    if (!res.ok) return { ok: false, error: `轮询视频任务失败：HTTP ${res.status}`, raw };
+    const urls = extractVideoUrls(raw);
+    const status = String(raw?.status || raw?.data?.status || '').toLowerCase();
+    if (urls.length) {
+      return { ok: true, urls, raw };
+    }
+    if (FAILURE_STATUS.includes(status)) {
+      return { ok: false, error: raw?.error?.message || raw?.message || '视频任务失败', raw };
+    }
+  }
+  return { ok: false, error: '视频任务轮询超时(20 分钟)' };
+}
+
 async function generateImage(provider, input = {}, options = {}) {
   const validation = validateProvider(provider, { apiKeyRequired: true });
   if (!validation.ok) return validation;
@@ -485,7 +519,18 @@ async function generateVideo(provider, input = {}, options = {}) {
         raw,
       };
     }
-    const videoUrls = extractVideoUrls(raw);
+    let videoUrls = extractVideoUrls(raw);
+    if (!videoUrls.length) {
+      // 同步无视频 → 检测异步任务,轮询取结果。
+      const taskId = extractTaskId(raw);
+      if (taskId) {
+        const polled = await pollExternalVideoTask(provider, validation.baseUrl, taskId, options);
+        if (!polled.ok) {
+          return { ok: false, code: 'video_task_failed', providerId: provider.id, protocol: provider.protocol, error: polled.error, taskId, raw: polled.raw || raw };
+        }
+        videoUrls = polled.urls;
+      }
+    }
     if (!videoUrls.length) {
       return { ok: false, code: 'empty_video', providerId: provider.id, protocol: provider.protocol, error: '扩展视频接口没有返回视频。', taskId: extractTaskId(raw), raw };
     }
