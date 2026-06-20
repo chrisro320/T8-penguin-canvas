@@ -4,7 +4,10 @@ import { readFileSync } from 'node:fs';
 import {
   buildTimelineDirectorExternalVideoRequest,
   buildTimelineDirectorLlmOptimizationPrompt,
+  clampTimelineDirectorSegmentDuration,
+  normalizeTimelineDirectorTotalDuration,
   sanitizeTimelineDirectorBlocks,
+  timelineDirectorTotalDuration,
   type TimelineDirectorBlockInput,
 } from '../src/utils/timelineDirector.ts';
 
@@ -83,6 +86,38 @@ test('timeline director sanitizes legacy blocks and keeps stable @ tokens from i
   assert.equal(second.imageName, 'scene_01');
   assert.equal(second.mentionToken, '@scene_01');
   assert.equal(second.imageRole, 'environment-720');
+});
+
+test('timeline director enforces total duration between 4 and 15 seconds while editing', () => {
+  const tooLong = normalizeTimelineDirectorTotalDuration([
+    { id: 'a', imageUrl: '/a.png', durationSec: 8 },
+    { id: 'b', imageUrl: '/b.png', durationSec: 8 },
+    { id: 'c', imageUrl: '/c.png', durationSec: 2 },
+    { id: 'd', imageUrl: '/d.png', durationSec: 3 },
+  ]);
+
+  assert.equal(timelineDirectorTotalDuration(tooLong), 15);
+  assert.ok(tooLong.slice(0, -1).every((block) => block.durationSec >= 0.5 && block.durationSec <= 8));
+
+  const tooShort = normalizeTimelineDirectorTotalDuration([
+    { id: 'a', imageUrl: '/a.png', durationSec: 0.5 },
+    { id: 'b', imageUrl: '/b.png', durationSec: 0.5 },
+  ]);
+  assert.equal(timelineDirectorTotalDuration(tooShort), 4);
+  assert.equal(tooShort[0].durationSec, 4);
+
+  assert.equal(clampTimelineDirectorSegmentDuration(tooLong, 0, 8), 5);
+  assert.equal(clampTimelineDirectorSegmentDuration([
+    { id: 'a', durationSec: 8 },
+    { id: 'b', durationSec: 8 },
+    { id: 'c', durationSec: 2 },
+    { id: 'd', durationSec: 3 },
+  ], 1, 8), 5);
+  assert.equal(clampTimelineDirectorSegmentDuration([
+    { id: 'a', durationSec: 2 },
+    { id: 'b', durationSec: 1 },
+    { id: 'c', durationSec: 3 },
+  ], 1, 0.5), 2);
 });
 
 test('timeline director LLM optimization prompt is a real time-storyboard script contract', () => {

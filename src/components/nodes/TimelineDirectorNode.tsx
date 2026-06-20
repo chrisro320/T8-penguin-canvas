@@ -32,9 +32,12 @@ import {
   buildTimelineDirectorExternalVideoRequest,
   buildTimelineDirectorLlmOptimizationPrompt,
   buildTimelineDirectorSegments,
+  clampTimelineDirectorSegmentDuration,
+  normalizeTimelineDirectorTotalDuration,
   parseTimelineDirectorFullLlmOutput,
   sanitizeTimelineDirectorBlocks,
   sanitizeTimelineImageName,
+  timelineDirectorTotalDuration,
   timelineImageRoleLabel,
   type TimelineDirectorBlock,
   type TimelineDirectorBlockInput,
@@ -240,12 +243,15 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
     }
   }, [activeId, blocks]);
 
-  const setBlocks = (next: TimelineDirectorBlockInput[]) => update({ blocks: sanitizeTimelineDirectorBlocks(next) });
-  const patchBlock = (bid: string, patch: Partial<Block>) => setBlocks(blocks.map((b) => (b.id === bid ? { ...b, ...patch } : b)));
+  const setBlocks = (next: TimelineDirectorBlockInput[], preferredIndex = 0) => update({ blocks: normalizeTimelineDirectorTotalDuration(next, preferredIndex) });
+  const patchBlock = (bid: string, patch: Partial<Block>) => {
+    const preferredIndex = Math.max(0, blocks.findIndex((block) => block.id === bid));
+    setBlocks(blocks.map((b) => (b.id === bid ? { ...b, ...patch } : b)), preferredIndex);
+  };
   const addBlock = () => {
     if (blocks.length >= MAX_FRAMES) return;
     const b = newBlock();
-    setBlocks([...blocks, b]);
+    setBlocks([...blocks, b], blocks.length - 1);
     setActiveId(b.id);
   };
   const removeBlock = (bid: string) => {
@@ -259,7 +265,7 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
     const i = blocks.findIndex((b) => b.id === bid);
     if (i < 0) return;
     const copy = { ...blocks[i], id: genId('blk'), title: `${blocks[i].title || blocks[i].imageName} copy`, imageName: `${blocks[i].imageName || `frame${i + 1}`}_copy` };
-    setBlocks([...blocks.slice(0, i + 1), copy, ...blocks.slice(i + 1)]);
+    setBlocks([...blocks.slice(0, i + 1), copy, ...blocks.slice(i + 1)], i + 1);
     setActiveId(copy.id);
   };
   const moveBlock = (bid: string, dir: -1 | 1) => {
@@ -268,7 +274,7 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
     if (i < 0 || j < 0 || j >= blocks.length) return;
     const next = [...blocks];
     [next[i], next[j]] = [next[j], next[i]];
-    setBlocks(next);
+    setBlocks(next, Math.min(i, j));
   };
   const setActiveImage = (url: string, name?: string) => {
     if (!activeBlock) return;
@@ -348,8 +354,10 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
   const applyResize = (clientX: number) => {
     const state = resizeStateRef.current;
     if (!state) return false;
-    const durationSec = calcDragDuration(state.startDurationSec, state.startClientX, clientX, state.timelineWidthPx, state.totalDurationSec);
-    update({ blocks: state.baseBlocks.map((b) => (b.id === state.blockId ? { ...b, durationSec } : b)) });
+    const index = state.baseBlocks.findIndex((block) => block.id === state.blockId);
+    const rawDurationSec = calcDragDuration(state.startDurationSec, state.startClientX, clientX, state.timelineWidthPx, state.totalDurationSec);
+    const durationSec = clampTimelineDirectorSegmentDuration(state.baseBlocks, index, rawDurationSec);
+    update({ blocks: normalizeTimelineDirectorTotalDuration(state.baseBlocks.map((b) => (b.id === state.blockId ? { ...b, durationSec } : b)), index) });
     return true;
   };
   const finishResize = () => {
@@ -370,7 +378,7 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
       startClientX,
       startDurationSec: Number(block.durationSec) || 0,
       timelineWidthPx: rect.width,
-      totalDurationSec: Math.max(SEG_MIN, blocks.slice(0, -1).reduce((s, b) => s + (Number(b.durationSec) || 0), 0)),
+      totalDurationSec: Math.max(SEG_MIN, timelineDirectorTotalDuration(blocks)),
     };
     resizeCleanupRef.current = cleanup;
     return true;
@@ -1008,7 +1016,9 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
                     className={`${controlCls} w-16 text-xs`}
                     style={inputStyle}
                     value={activeBlock.durationSec}
-                    onChange={(e) => patchBlock(activeBlock.id, { durationSec: clamp(round1(Number(e.target.value) || 0), SEG_MIN, SEG_MAX) })}
+                    onChange={(e) => patchBlock(activeBlock.id, {
+                      durationSec: clampTimelineDirectorSegmentDuration(blocks, activeIndex, round1(Number(e.target.value) || 0)),
+                    })}
                   />
                   s
                 </label>

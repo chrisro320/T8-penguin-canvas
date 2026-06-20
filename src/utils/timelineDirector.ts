@@ -125,6 +125,80 @@ export function sanitizeTimelineSegmentDuration(value: unknown): number {
   return clamp(round1(n), TIMELINE_DIRECTOR_MIN_SEGMENT_DURATION_SEC, TIMELINE_DIRECTOR_MAX_SEGMENT_DURATION_SEC);
 }
 
+export function timelineDirectorTotalDuration(input: TimelineDirectorBlockInput[]): number {
+  const blocks = sanitizeTimelineDirectorBlocks(input);
+  return round1(blocks.slice(0, -1).reduce((sum, block) => sum + block.durationSec, 0));
+}
+
+function setSegmentDuration(
+  blocks: TimelineDirectorBlock[],
+  index: number,
+  value: number,
+) {
+  blocks[index] = {
+    ...blocks[index],
+    durationSec: sanitizeTimelineSegmentDuration(value),
+  };
+}
+
+export function normalizeTimelineDirectorTotalDuration(
+  input: TimelineDirectorBlockInput[],
+  preferredIndex = 0,
+): TimelineDirectorBlock[] {
+  const blocks = sanitizeTimelineDirectorBlocks(input);
+  const segmentCount = Math.max(0, blocks.length - 1);
+  if (segmentCount === 0) return blocks;
+
+  const preferred = Math.max(0, Math.min(segmentCount - 1, Math.round(preferredIndex)));
+  let total = timelineDirectorTotalDuration(blocks);
+
+  if (total > TIMELINE_DIRECTOR_MAX_TOTAL_DURATION_SEC) {
+    let overflow = round1(total - TIMELINE_DIRECTOR_MAX_TOTAL_DURATION_SEC);
+    const order = [preferred, ...Array.from({ length: segmentCount }, (_, index) => index).filter((index) => index !== preferred).reverse()];
+    for (const index of order) {
+      if (overflow <= 0) break;
+      const room = round1(blocks[index].durationSec - TIMELINE_DIRECTOR_MIN_SEGMENT_DURATION_SEC);
+      if (room <= 0) continue;
+      const cut = Math.min(room, overflow);
+      setSegmentDuration(blocks, index, blocks[index].durationSec - cut);
+      overflow = round1(overflow - cut);
+    }
+  }
+
+  total = timelineDirectorTotalDuration(blocks);
+  if (total < TIMELINE_DIRECTOR_MIN_TOTAL_DURATION_SEC) {
+    let shortage = round1(TIMELINE_DIRECTOR_MIN_TOTAL_DURATION_SEC - total);
+    const order = [preferred, ...Array.from({ length: segmentCount }, (_, index) => index).filter((index) => index !== preferred)];
+    for (const index of order) {
+      if (shortage <= 0) break;
+      const room = round1(TIMELINE_DIRECTOR_MAX_SEGMENT_DURATION_SEC - blocks[index].durationSec);
+      if (room <= 0) continue;
+      const add = Math.min(room, shortage);
+      setSegmentDuration(blocks, index, blocks[index].durationSec + add);
+      shortage = round1(shortage - add);
+    }
+  }
+
+  return blocks;
+}
+
+export function clampTimelineDirectorSegmentDuration(
+  input: TimelineDirectorBlockInput[],
+  index: number,
+  value: unknown,
+): number {
+  const blocks = sanitizeTimelineDirectorBlocks(input);
+  const segmentCount = blocks.length - 1;
+  if (index < 0 || index >= segmentCount) return sanitizeTimelineSegmentDuration(value);
+  const next = blocks.map((block, blockIndex) => (
+    blockIndex === index
+      ? { ...block, durationSec: sanitizeTimelineSegmentDuration(value) }
+      : block
+  ));
+  const normalized = normalizeTimelineDirectorTotalDuration(next, index);
+  return normalized[index]?.durationSec ?? sanitizeTimelineSegmentDuration(value);
+}
+
 function basenameFromUrl(url: string): string {
   const clean = String(url || '').split(/[?#]/)[0];
   try {
