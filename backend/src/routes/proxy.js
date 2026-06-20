@@ -1690,7 +1690,10 @@ router.post('/llm', async (req, res) => {
     return res.status(400).json({ success: false, error: e.message || '多模态素材预处理失败' });
   }
 
-  const upstream = `${config.ZHENZHEN_BASE_URL}/v1/chat/completions`;
+  // LLM 独立 Key 的 base URL 可由用户在「API 设置」自定义(默认 ai.t8star.org)。
+  // 仅 LLM/Vision 走标准 OpenAI /v1/chat/completions,兼容任意 OpenAI 协议端点。
+  const llmBase = (settings.llmBaseUrl || config.ZHENZHEN_BASE_URL).replace(/\/+$/, '');
+  const upstream = `${llmBase}/v1/chat/completions`;
   const payload = {
     model,
     messages: normalizedMessages,

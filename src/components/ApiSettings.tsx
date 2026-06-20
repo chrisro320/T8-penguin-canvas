@@ -294,6 +294,8 @@ export default function ApiSettingsModal({ open, onClose }: ApiSettingsModalProp
   const [themeTemplatePathInput, setThemeTemplatePathInput] = useState<string>('');
   // 本地 Eagle API 地址
   const [eagleApiBaseInput, setEagleApiBaseInput] = useState<string>('');
+  // LLM 独立 Key 的 base URL(可自定义,默认 ai.t8star.org)
+  const [llmBaseUrlInput, setLlmBaseUrlInput] = useState<string>('');
   // 分类独立 Key 区块折叠状态（新手友好：默认折叠，点击展开）
   const [classifiedOpen, setClassifiedOpen] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -356,6 +358,7 @@ export default function ApiSettingsModal({ open, onClose }: ApiSettingsModalProp
       setResourceLibraryPathInput((settings as any)?.resourceLibraryPath || '');
       setThemeTemplatePathInput((settings as any)?.themeTemplatePath || '');
       setEagleApiBaseInput((settings as any)?.eagleApiBase || '');
+      setLlmBaseUrlInput((settings as any)?.llmBaseUrl || '');
     }
   }, [open, settings]);
 
@@ -390,6 +393,7 @@ export default function ApiSettingsModal({ open, onClose }: ApiSettingsModalProp
     resourceLibraryPath: resourceLibraryPathInput.trim(),
     themeTemplatePath: themeTemplatePathInput.trim(),
     eagleApiBase: eagleApiBaseInput.trim(),
+    llmBaseUrl: llmBaseUrlInput.trim(),
     ...(advancedDirty ? { advancedProviders: advancedProvidersInput } : {}),
     ...(cloudUploadDirty ? { cloudUploadTargets: cloudUploadTargetsInput } : {}),
   });
@@ -460,7 +464,6 @@ export default function ApiSettingsModal({ open, onClose }: ApiSettingsModalProp
           Object.entries(editable).filter(([, value]) => typeof value === 'string' && value.trim())
         ),
         zhenzhenBaseUrl: FIXED_ZHENZHEN_BASE,
-        llmBaseUrl: FIXED_ZHENZHEN_BASE,
         rhBaseUrl: RH_BASE,
       };
       const payload = {
@@ -2266,7 +2269,7 @@ export default function ApiSettingsModal({ open, onClose }: ApiSettingsModalProp
   };
 
   // 渲染单个 Key 表项
-  const renderKey = (spec: KeySpec, opts: { fallbackHint?: boolean; baseUrlNote?: string }) => {
+  const renderKey = (spec: KeySpec, opts: { fallbackHint?: boolean; baseUrlNote?: string; editableBaseUrl?: boolean }) => {
     const f = spec.field;
     const rawVal = (settings as any)[f] as string | undefined;
     const hasSaved = !!rawVal;
@@ -2326,6 +2329,24 @@ export default function ApiSettingsModal({ open, onClose }: ApiSettingsModalProp
             </button>
           )}
         </div>
+        {opts.editableBaseUrl && (
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={llmBaseUrlInput}
+                onChange={(e) => setLlmBaseUrlInput(e.target.value)}
+                placeholder="https://ai.t8star.org（留空用默认）"
+                className={inputCls}
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </div>
+            <div className={`flex items-center gap-1.5 flex-wrap text-[11px] ${hintCls}`}>
+              Base URL（与贞贞同地址或自定义 OpenAI 兼容端点，Key 独立）；留空则用默认 https://ai.t8star.org
+            </div>
+          </div>
+        )}
         {(opts.baseUrlNote || renderGetKeyButtons(spec.field)) && (
           <div className={`flex items-center gap-2 flex-wrap text-[11px] ${hintCls}`}>
             {opts.baseUrlNote && (
@@ -2399,7 +2420,7 @@ export default function ApiSettingsModal({ open, onClose }: ApiSettingsModalProp
             onSaved={load}
           />
           {renderKey(COMMON_KEYS[1], { baseUrlNote: `Base URL: ${RH_BASE}` })}
-          {renderKey(COMMON_KEYS[2], { baseUrlNote: `Base URL 锁定: ${FIXED_ZHENZHEN_BASE} (与贞贞同地址, Key 独立)` })}
+          {renderKey(COMMON_KEYS[2], { editableBaseUrl: true })}
 
           {/* 分类独立 Key（默认折叠，点击展开 —— 新手友好） */}
           <div className="t8-api-settings-divider pt-3 border-t">

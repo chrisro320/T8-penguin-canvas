@@ -2,18 +2,18 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import fs from 'fs';
 import path from 'path';
-var LOCAL_EXTENSIONS_MODULE = 'virtual:t8-local-extensions';
-var LOCAL_EXTENSIONS_ENTRY = path.resolve(__dirname, 'local-private', 'extensions', 'frontend', 'index.tsx');
-var EMPTY_EXTENSIONS_ENTRY = path.resolve(__dirname, 'src', 'extensions', 'emptyLocalExtensions.tsx');
+const LOCAL_EXTENSIONS_MODULE = 'virtual:t8-local-extensions';
+const LOCAL_EXTENSIONS_ENTRY = path.resolve(__dirname, 'local-private', 'extensions', 'frontend', 'index.tsx');
+const EMPTY_EXTENSIONS_ENTRY = path.resolve(__dirname, 'src', 'extensions', 'emptyLocalExtensions.tsx');
 function localExtensionsPlugin() {
     return {
         name: 't8-local-extensions',
-        resolveId: function (id) {
+        resolveId(id) {
             if (id !== LOCAL_EXTENSIONS_MODULE)
                 return null;
-            var disabled = process.env.T8_ENABLE_LOCAL_PRIVATE === '0'
+            const disabled = process.env.T8_ENABLE_LOCAL_PRIVATE === '0'
                 || process.env.T8_DISABLE_LOCAL_EXTENSIONS === '1';
-            var enabled = !disabled;
+            const enabled = !disabled;
             return enabled && fs.existsSync(LOCAL_EXTENSIONS_ENTRY)
                 ? LOCAL_EXTENSIONS_ENTRY
                 : EMPTY_EXTENSIONS_ENTRY;

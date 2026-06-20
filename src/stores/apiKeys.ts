@@ -69,7 +69,7 @@ export const useApiKeysStore = create<ApiKeysState>((set) => ({
     try {
       const data = await api.getSettings();
       set({
-        settings: { ...DEFAULT, ...data, zhenzhenBaseUrl: FIXED_ZHENZHEN_BASE, llmBaseUrl: FIXED_ZHENZHEN_BASE },
+        settings: { ...DEFAULT, ...data, zhenzhenBaseUrl: FIXED_ZHENZHEN_BASE },
         loading: false,
         loaded: true,
       });
@@ -85,7 +85,7 @@ export const useApiKeysStore = create<ApiKeysState>((set) => ({
       // 重新拉取(后端会返回脱敏后的 Key)
       const data = await api.getSettings();
       set({
-        settings: { ...DEFAULT, ...data, zhenzhenBaseUrl: FIXED_ZHENZHEN_BASE, llmBaseUrl: FIXED_ZHENZHEN_BASE },
+        settings: { ...DEFAULT, ...data, zhenzhenBaseUrl: FIXED_ZHENZHEN_BASE },
         loading: false,
       });
     } catch (e: any) {

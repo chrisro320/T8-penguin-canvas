@@ -17,6 +17,14 @@ const {
 
 const router = express.Router();
 
+// LLM 独立 Key 的 base URL 允许用户自定义(默认 ai.t8star.org)。
+// 校验:必须是 http(s) 地址,去尾部斜杠;非法或空值回落到默认配置值。
+function normalizeLlmBaseUrl(value) {
+  if (typeof value !== 'string') return config.ZHENZHEN_BASE_URL;
+  const u = value.trim().replace(/\/+$/, '');
+  return /^https?:\/\//i.test(u) ? u : config.ZHENZHEN_BASE_URL;
+}
+
 const TASK_COMPLETION_SOUND_DEFAULT = {
   mode: 'default',
   name: '',
@@ -221,12 +229,12 @@ function loadSettings({ persistMigrations = true } = {}) {
   if (!fs.existsSync(config.SETTINGS_FILE)) return { ...DEFAULT_SETTINGS };
   try {
     const data = JSON.parse(fs.readFileSync(config.SETTINGS_FILE, 'utf-8'));
-    // 强制 base URL 与配置一致(防篡改)
+    // 工坊 base URL 强制与配置一致(防篡改);LLM 独立 Key 的 base URL 允许用户自定义。
     const merged = {
       ...DEFAULT_SETTINGS,
       ...data,
       zhenzhenBaseUrl: config.ZHENZHEN_BASE_URL,
-      llmBaseUrl: config.ZHENZHEN_BASE_URL,
+      llmBaseUrl: normalizeLlmBaseUrl(data.llmBaseUrl),
     };
     merged.advancedProviders = normalizeAdvancedProviders(data.advancedProviders);
     merged.cloudUploadTargets = normalizeCloudUploadTargets(data.cloudUploadTargets);
@@ -375,9 +383,11 @@ router.post('/', (req, res) => {
   const merged = {
     ...current,
     ...safeIncoming,
-    // base URL 强制为配置值,不允许覆盖
+    // 工坊 base URL 强制为配置值,不允许覆盖;LLM 独立 Key 的 base URL 允许用户自定义。
     zhenzhenBaseUrl: config.ZHENZHEN_BASE_URL,
-    llmBaseUrl: config.ZHENZHEN_BASE_URL,
+    llmBaseUrl: normalizeLlmBaseUrl(
+      Object.prototype.hasOwnProperty.call(safeIncoming, 'llmBaseUrl') ? safeIncoming.llmBaseUrl : current.llmBaseUrl
+    ),
   };
   merged.advancedProviders = hasAdvancedProviders
     ? normalizeAdvancedProviders(incoming.advancedProviders, current.advancedProviders)
