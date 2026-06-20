@@ -1,4 +1,4 @@
-import { Fragment, memo, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
+import { Fragment, memo, useEffect, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
 import { AlertCircle, ArrowLeft, ArrowRight, Clapperboard, Copy, Image as ImageIcon, Library, Loader2, Music, Plus, Sparkles, Trash2, Video as VideoIcon, Wand2, X } from 'lucide-react';
 import {
@@ -30,6 +30,7 @@ import {
   TIMELINE_DIRECTOR_MIN_SEGMENT_DURATION_SEC,
   TIMELINE_DIRECTOR_MIN_TOTAL_DURATION_SEC,
   buildTimelineDirectorExternalVideoRequest,
+  buildTimelineDirectorCompiledPrompt,
   buildTimelineDirectorLlmOptimizationPrompt,
   buildTimelineDirectorSegments,
   clampTimelineDirectorSegmentDuration,
@@ -38,16 +39,14 @@ import {
   sanitizeTimelineDirectorBlocks,
   sanitizeTimelineImageName,
   timelineDirectorTotalDuration,
-  timelineImageRoleLabel,
   type TimelineDirectorBlock,
   type TimelineDirectorBlockInput,
-  type TimelineFrameImageRole,
 } from '../../utils/timelineDirector';
 
 /**
  * TimelineDirectorNode — 单段视频 · 时间轴导演
- * 时间线由 N 个「帧块」组成(像导演分镜台的 S1-S6),每块 = 一个关键帧图 + 该帧之后的过渡时长与描述。
- * 末帧只定格、无时长。生成时:块图 = 即梦关键帧,相邻块过渡 = N-1 段 transition-prompt/duration → multiframe2video。
+ * 时间线由 N 个「关键帧」组成,每块 = 一个真实图片 + 该帧之后的时长与描述。
+ * 末帧只定格、无时长。生成时:图片走 --images,完整 prompt 只拼一段再填入 N-1 个 transition-prompt。
  */
 
 const MAX_FRAMES = 9;
@@ -57,13 +56,6 @@ const SEG_MIN = TIMELINE_DIRECTOR_MIN_SEGMENT_DURATION_SEC;
 const SEG_MAX = TIMELINE_DIRECTOR_MAX_SEGMENT_DURATION_SEC;
 const RATIO_OPTIONS = ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9', '9:21', 'adaptive'];
 const RESOLUTION_OPTIONS = ['480p', '720p', 'native1080p', '1080p', '2k', '4k'];
-const IMAGE_ROLE_OPTIONS: Array<{ value: TimelineFrameImageRole; label: string }> = [
-  { value: 'keyframe', label: '关键帧图' },
-  { value: 'character', label: '人设图' },
-  { value: 'environment-720', label: '720环境图' },
-  { value: 'storyboard', label: '故事板图' },
-  { value: 'reference', label: '参考图' },
-];
 
 type Block = TimelineDirectorBlock;
 type ReferenceKind = 'image' | 'video' | 'audio';
@@ -76,7 +68,6 @@ const newBlock = (): Block => sanitizeTimelineDirectorBlocks([{
   id: genId('blk'),
   title: '',
   imageName: '',
-  imageRole: 'keyframe',
   imageUrl: '',
   prompt: '',
   mentions: [],
@@ -152,7 +143,6 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
     () => sanitizeTimelineDirectorBlocks(Array.isArray(d.blocks) && d.blocks.length ? d.blocks : []),
     [d.blocks],
   );
-  const globalStyle: string = d.globalStyle || '';
   const generateAudio: boolean = d.generateAudio !== false;
   const seed: number = typeof d.seed === 'number' ? d.seed : -1;
   const llmMode: 'segment' | 'full' = d.llmMode === 'full' ? 'full' : 'segment';
@@ -196,12 +186,18 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
   const upstream = useUpstreamMaterials(id);
   const localRefVideos = useMemo(() => dedupe(Array.isArray(d.localRefVideos) ? d.localRefVideos : []), [d.localRefVideos]);
   const localRefAudios = useMemo(() => dedupe(Array.isArray(d.localRefAudios) ? d.localRefAudios : []), [d.localRefAudios]);
-  const allUpstreamMaterials = useMemo(
-    () => [...upstream.texts, ...upstream.images, ...upstream.videos, ...upstream.audios],
-    [upstream.texts, upstream.images, upstream.videos, upstream.audios],
-  );
   const localMaterials = useMemo<Material[]>(
     () => [
+      ...blocks.filter((block) => block.imageUrl).map((block, index) => ({
+        id: `${id}:timeline-frame-image:${block.id}:${block.imageUrl}`,
+        kind: 'image' as const,
+        url: block.imageUrl,
+        sourceNodeId: id,
+        origin: 'local' as const,
+        label: block.imageName || block.title || `F${index + 1}`,
+        mentionKey: `timeline-frame:${block.id}:${block.imageUrl}`,
+        mentionToken: block.mentionToken,
+      })),
       ...localRefVideos.map((url, index) => ({
         id: `${id}:timeline-local-video:${index}:${url}`,
         kind: 'video' as const,
@@ -219,12 +215,14 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
         label: `全局音频${index + 1}`,
       })),
     ],
-    [id, localRefVideos, localRefAudios],
+    [blocks, id, localRefVideos, localRefAudios],
   );
   const mentionMaterials = useMemo(
-    () => [...allUpstreamMaterials, ...localMaterials],
-    [allUpstreamMaterials, localMaterials],
+    () => [...upstream.texts, ...upstream.videos, ...upstream.audios, ...localMaterials],
+    [upstream.texts, upstream.videos, upstream.audios, localMaterials],
   );
+  const globalPrompt: string = typeof d.globalPrompt === 'string' ? d.globalPrompt : '';
+  const globalPromptMentions: MediaMention[] = Array.isArray(d.globalPromptMentions) ? d.globalPromptMentions : [];
 
   // 末帧不计时长;总时长 = 前 N-1 块时长和
   const totalDuration = useMemo(
@@ -233,6 +231,7 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
   );
   const framedCount = blocks.filter((b) => b.imageUrl).length;
   const totalValid = blocks.length >= 2 && framedCount === blocks.length && totalDuration >= MIN_TOTAL && totalDuration <= MAX_TOTAL;
+  const canAddBlock = blocks.length < MAX_FRAMES && totalDuration < MAX_TOTAL;
   const activeIndex = blocks.findIndex((b) => b.id === activeId);
   const activeBlock = activeIndex >= 0 ? blocks[activeIndex] : null;
   const isLastActive = activeIndex === blocks.length - 1;
@@ -249,7 +248,7 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
     setBlocks(blocks.map((b) => (b.id === bid ? { ...b, ...patch } : b)), preferredIndex);
   };
   const addBlock = () => {
-    if (blocks.length >= MAX_FRAMES) return;
+    if (!canAddBlock) return;
     const b = newBlock();
     setBlocks([...blocks, b], blocks.length - 1);
     setActiveId(b.id);
@@ -261,7 +260,7 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
     if (activeId === bid) setActiveId(null);
   };
   const duplicateBlock = (bid: string) => {
-    if (blocks.length >= MAX_FRAMES) return;
+    if (!canAddBlock) return;
     const i = blocks.findIndex((b) => b.id === bid);
     if (i < 0) return;
     const copy = { ...blocks[i], id: genId('blk'), title: `${blocks[i].title || blocks[i].imageName} copy`, imageName: `${blocks[i].imageName || `frame${i + 1}`}_copy` };
@@ -275,6 +274,11 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
     const next = [...blocks];
     [next[i], next[j]] = [next[j], next[i]];
     setBlocks(next, Math.min(i, j));
+  };
+  const stopDeleteFromCanvas = (event: KeyboardEvent<HTMLElement>) => {
+    if (event.key === 'Delete' || event.key === 'Backspace') {
+      event.stopPropagation();
+    }
   };
   const setActiveImage = (url: string, name?: string) => {
     if (!activeBlock) return;
@@ -292,13 +296,6 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
       return;
     }
     update({ localRefAudios: dedupe([...localRefAudios, ...clean]) });
-  };
-  const removeRef = (kind: 'video' | 'audio', url: string) => {
-    if (kind === 'video') {
-      update({ localRefVideos: localRefVideos.filter((item) => item !== url) });
-      return;
-    }
-    update({ localRefAudios: localRefAudios.filter((item) => item !== url) });
   };
   const handleUpload = async (kind: ReferenceKind, event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files || []);
@@ -521,10 +518,11 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
   const handleOptimize = async () => {
     const transBlocks = blocks.slice(0, -1);
     if (!transBlocks.length) { setError('先添加帧'); return; }
+    const resolvedGlobalPrompt = resolveMediaMentions(globalPrompt, globalPromptMentions, mentionMaterials).trim();
     setError(null); setOptimizing(true);
     try {
       if (llmMode === 'full') {
-        const prompt = buildTimelineDirectorLlmOptimizationPrompt(blocks, { mode: 'full', globalStyle });
+        const prompt = buildTimelineDirectorLlmOptimizationPrompt(blocks, { mode: 'full', globalPrompt: resolvedGlobalPrompt });
         const out = await callLlm(prompt.system, prompt.user);
         const map = parseTimelineDirectorFullLlmOutput(out);
         setBlocks(blocks.map((b, i) => (i < transBlocks.length && map.has(i + 1) ? { ...b, prompt: map.get(i + 1) as string, mentions: [] } : b)));
@@ -535,7 +533,7 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
           if (!resolved) continue;
           const prompt = buildTimelineDirectorLlmOptimizationPrompt(
             blocks.map((b, idx) => (idx === i ? { ...b, prompt: resolved } : b)),
-            { mode: 'segment', globalStyle },
+            { mode: 'segment', globalPrompt: resolvedGlobalPrompt },
           );
           const segmentLine = prompt.user.split('\n').find((line) => line.startsWith(`第${i + 1}段`)) || prompt.user;
           const out = await callLlm(prompt.system, segmentLine);
@@ -550,15 +548,22 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
   };
 
   // === 编译即梦 multiframe 参数 ===
+  const resolvedGlobalPrompt = useMemo(
+    () => resolveMediaMentions(globalPrompt, globalPromptMentions, mentionMaterials).trim(),
+    [globalPrompt, globalPromptMentions, mentionMaterials],
+  );
   const resolvedBlocks = useMemo(() => blocks.map((block) => ({
     ...block,
     prompt: resolveMediaMentions(block.prompt, block.mentions, mentionMaterials).trim(),
     mentions: [] as MediaMention[],
   })), [blocks, mentionMaterials]);
   const mentionedMedia = useMemo(() => {
-    const allMentions = blocks.flatMap((block) => (Array.isArray(block.mentions) ? block.mentions : []));
+    const allMentions = [
+      ...globalPromptMentions,
+      ...blocks.flatMap((block) => (Array.isArray(block.mentions) ? block.mentions : [])),
+    ];
     return collectMentionedMedia(allMentions, mentionMaterials);
-  }, [blocks, mentionMaterials]);
+  }, [blocks, globalPromptMentions, mentionMaterials]);
   const requestVideos = useMemo(
     () => dedupe([...localRefVideos, ...mentionedMedia.videos]),
     [localRefVideos, mentionedMedia.videos],
@@ -567,14 +572,19 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
     () => dedupe([...localRefAudios, ...mentionedMedia.audios]),
     [localRefAudios, mentionedMedia.audios],
   );
-  const compiledSegments = useMemo(() => buildTimelineDirectorSegments(resolvedBlocks, { globalStyle }), [resolvedBlocks, globalStyle]);
+  const compiledSegments = useMemo(() => buildTimelineDirectorSegments(resolvedBlocks), [resolvedBlocks]);
+  const compiledPrompt = useMemo(
+    () => buildTimelineDirectorCompiledPrompt(resolvedBlocks, { globalPrompt: resolvedGlobalPrompt }),
+    [resolvedBlocks, resolvedGlobalPrompt],
+  );
   const compiled = useMemo(() => ({
-    transitionPrompts: compiledSegments.map((segment) => segment.prompt),
+    prompt: compiledPrompt,
+    transitionPrompts: compiledSegments.map(() => compiledPrompt),
     transitionDurations: compiledSegments.map((segment) => segment.durationSec),
     images: blocks.map((b) => b.imageUrl),
     videos: requestVideos,
     audios: requestAudios,
-  }), [blocks, compiledSegments, requestVideos, requestAudios]);
+  }), [blocks, compiledPrompt, compiledSegments, requestVideos, requestAudios]);
 
   // === 生成 ===
   const startTimer = () => { setElapsed(0); if (elapsedTimer.current) window.clearInterval(elapsedTimer.current); elapsedTimer.current = window.setInterval(() => setElapsed((e) => e + 1), 1000) as unknown as number; };
@@ -600,7 +610,7 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
         resolution,
         generateAudio,
         seed,
-        globalStyle,
+        globalPrompt: resolvedGlobalPrompt,
         videos: requestVideos,
         audios: requestAudios,
         providerParams: d?.providerParams && typeof d.providerParams === 'object' ? d.providerParams : {},
@@ -637,7 +647,7 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
   const completedVideoUrls = (Array.isArray(d.videoUrls) ? d.videoUrls : []).filter(Boolean);
   const currentOutputCount = videoUrl || completedVideoUrls.length ? 1 : 0;
   const latestVideoUrl = videoUrl || completedVideoUrls[0] || '';
-  const activeBlockLabel = activeBlock ? `S${activeIndex + 1}` : '';
+  const activeBlockLabel = activeBlock ? `F${activeIndex + 1}` : '';
   const activeBlockTitleIsAuto = activeBlock
     ? activeBlock.title === activeBlock.imageName && /^frame\d+$/i.test(activeBlock.imageName)
     : false;
@@ -662,39 +672,6 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
       );
     }
     return <SmartImage src={item.thumbUrl || item.fileUrl} alt={item.title} thumbSize={160} className="h-full w-full object-cover" />;
-  };
-  const renderReferencePool = () => {
-    const refs = [
-      ...localRefVideos.map((url) => ({ kind: 'video' as const, url })),
-      ...localRefAudios.map((url) => ({ kind: 'audio' as const, url })),
-    ];
-    if (!refs.length) {
-      return <div className="text-[10px]" style={mutedStyle}>暂无全局视频/音频参考</div>;
-    }
-    return (
-      <div className="flex flex-wrap gap-1.5">
-        {refs.map((ref) => (
-          <div key={`${ref.kind}:${ref.url}`} className="group relative h-12 w-14 overflow-hidden rounded border" style={{ borderColor: subBorder, background: 'var(--t8-bg-panel, rgba(15,23,42,.72))' }} title={fileName(ref.url)}>
-            {ref.kind === 'video' ? (
-              <LoopingVideo src={ref.url} className="h-full w-full object-cover bg-black" muted />
-            ) : (
-              <div className="flex h-full w-full flex-col items-center justify-center gap-1 text-[9px]" style={mutedStyle}>
-                <Music size={15} />
-                <span className="max-w-full truncate px-1">{fileName(ref.url)}</span>
-              </div>
-            )}
-            <button
-              type="button"
-              className="absolute right-0.5 top-0.5 flex h-4 w-4 items-center justify-center rounded bg-black/70 text-white opacity-0 transition group-hover:opacity-100"
-              onClick={() => removeRef(ref.kind, ref.url)}
-              title="移除"
-            >
-              <X size={10} />
-            </button>
-          </div>
-        ))}
-      </div>
-    );
   };
   const resourcePicker = resourcePickerKind ? (
     <div
@@ -797,7 +774,7 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
         <div className="min-w-0 flex-1">
           <div className="font-semibold leading-tight">时间轴导演台</div>
           <div className="truncate text-[11px]" style={mutedStyle}>
-            {blocks.length} 镜头 · {totalDuration}s · Seedance2.0 单视频
+            {blocks.length} 帧 · {totalDuration}s · Seedance2.0 单视频
           </div>
         </div>
         <span
@@ -879,11 +856,26 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
 
         {/* 时间线(帧块,永远可见) */}
         <div className={cardCls} style={cardStyle}>
-          <div className="flex items-center justify-between mb-2 text-[11px]">
+          <div className="mb-2 flex items-center justify-between text-[11px]">
             <span className="font-semibold">秒级时间线</span>
-            <button type="button" className={btnCls} style={{ borderColor: border }} disabled={blocks.length >= MAX_FRAMES} onClick={addBlock}>
-              <Plus size={11} /> 加分镜
+            <button type="button" className={btnCls} style={{ borderColor: border }} disabled={!canAddBlock} onClick={addBlock}>
+              <Plus size={11} /> 加关键帧
             </button>
+          </div>
+          <div className="mb-2">
+            <MentionPromptInput
+              title="全局提示词"
+              value={globalPrompt}
+              mentions={globalPromptMentions}
+              materials={mentionMaterials}
+              onChange={(value, mentions) => update({ globalPrompt: value, globalPromptMentions: mentions })}
+              placeholder="写人设、画风、环境等全局要求；输入 @ 可引用素材"
+              isDark={isDark}
+              isPixel={isPixel}
+              promptTemplateKind="video"
+              className="nodrag min-h-[64px] w-full resize-none rounded border px-2 py-1 text-xs outline-none"
+              style={inputStyle}
+            />
           </div>
           <div ref={timelineRef} className="flex h-14 min-w-0 items-stretch overflow-hidden rounded border nodrag nopan" style={{ borderColor: border }}>
             {blocks.map((b, i) => {
@@ -905,9 +897,9 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
                         ? 'color-mix(in srgb, var(--t8-accent, #d946ef) 26%, var(--t8-bg-panel, #111827))'
                         : 'var(--t8-bg-panel, rgba(15,23,42,.42))',
                     }}
-                    title="点击编辑；拖动右侧小条调整秒数"
+                    title="点击编辑；拖动右侧小条调整时长"
                   >
-                    <div className="truncate font-semibold">{b.title && !/^frame\d+$/i.test(b.title) ? b.title : `S${i + 1}`}</div>
+                    <div className="truncate font-semibold">{b.title && !/^frame\d+$/i.test(b.title) ? b.title : `F${i + 1}`}</div>
                     <div style={mutedStyle}>{isLast ? '定格' : `${round1(b.durationSec)}s`}</div>
                     {/* 状态点:有图=绿,无图=黄 */}
                     <span className="absolute bottom-1 left-1 h-1.5 w-1.5 rounded-full" style={{ background: b.imageUrl ? '#34d399' : '#fbbf24' }} title={b.imageUrl ? '已设图' : '未设图'} />
@@ -916,7 +908,7 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
                       <button
                         type="button"
                         data-timeline-resize-handle
-                        aria-label={`拖动调整 帧${i + 1} 时长`}
+                        aria-label={`拖动调整 F${i + 1} 时长`}
                         className="nodrag nopan absolute -right-1 top-0 z-20 h-full w-4 cursor-ew-resize rounded-sm border-l border-white/20 bg-white/5 opacity-80 transition hover:bg-white/20"
                         style={{ touchAction: 'none' }}
                         onClick={(ev) => ev.stopPropagation()}
@@ -943,8 +935,8 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
                         color: hasPrompt ? 'var(--t8-accent, #d946ef)' : 'var(--t8-text-muted, rgba(248,250,252,.62))',
                         background: hasPrompt ? 'color-mix(in srgb, var(--t8-accent, #d946ef) 12%, var(--t8-bg-panel, #111827))' : 'transparent',
                       }}
-                      title={`点击编辑帧${i + 1}过渡;拖动调时长`}
-                      aria-label={`帧${i + 1}过渡,点击编辑,拖动调时长`}
+                      title={`点击编辑 F${i + 1};拖动调时长`}
+                      aria-label={`F${i + 1},点击编辑,拖动调时长`}
                       onPointerDownCapture={(ev) => beginSeparator(ev, b)}
                       onMouseDownCapture={(ev) => beginSeparator(ev, b)}
                     >
@@ -955,7 +947,7 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
               );
             })}
           </div>
-          <div className="mt-2 text-[10px]" style={mutedStyle}>点帧块/拖块缘或↔ 调时长；末帧只定格、不计时长。总时长 = 各过渡之和。</div>
+          <div className="mt-2 text-[10px]" style={mutedStyle}>点帧块/拖块缘或↔ 调时长；末帧只定格、不计时长。总时长 = 前面各帧时长之和。</div>
         </div>
 
         {/* LLM 优化条 */}
@@ -996,7 +988,7 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
 
         {/* 选中帧编辑面板(参考导演台) */}
         {activeBlock ? (
-          <div className={cardCls} style={cardStyle}>
+          <div className={cardCls} style={cardStyle} onKeyDownCapture={stopDeleteFromCanvas}>
             <div className="mb-2 flex items-center gap-1.5">
               <input
                 className={`${controlCls} min-w-0 flex-1 text-xs font-semibold`}
@@ -1007,7 +999,7 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
               />
               {!isLastActive && (
                 <label className="flex shrink-0 items-center gap-1 text-[11px]" style={mutedStyle}>
-                  过渡时长
+                  时长
                   <input
                     type="number"
                     step={0.1}
@@ -1024,34 +1016,16 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
                 </label>
               )}
             </div>
-            <div className="mb-2 grid grid-cols-[minmax(0,1fr)_120px] gap-1.5">
-              <label className="text-[10px]" style={mutedStyle}>关键帧图名
-                <input
-                  className={`${controlCls} mt-1 w-full`}
-                  style={inputStyle}
-                  value={activeBlock.imageName}
-                  placeholder="@对应输入图片名"
-                  onChange={(e) => patchBlock(activeBlock.id, { imageName: sanitizeTimelineImageName(e.target.value, activeBlock.imageUrl, activeIndex) })}
-                />
-              </label>
-              <label className="text-[10px]" style={mutedStyle}>图片定位
-                <select
-                  className={`${controlCls} mt-1 w-full`}
-                  style={inputStyle}
-                  value={activeBlock.imageRole}
-                  onChange={(e) => patchBlock(activeBlock.id, { imageRole: e.target.value as TimelineFrameImageRole })}
-                >
-                  {IMAGE_ROLE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-                </select>
-              </label>
-              <div className="col-span-2 text-[10px]" style={mutedStyle}>
-                发送：{activeBlock.mentionToken} = {timelineImageRoleLabel(activeBlock.imageRole)}
-              </div>
-            </div>
-
             {/* 缩略图 */}
-            <div className="w-full h-28 rounded border mb-2 overflow-hidden flex items-center justify-center" style={{ borderColor: subBorder, background: 'rgba(0,0,0,.2)' }}>
-              {activeBlock.imageUrl ? <SmartImage src={activeBlock.imageUrl} alt="" className="w-full h-full object-contain" /> : <span className="text-[11px] opacity-40">未设关键帧图</span>}
+            <div className="relative mb-2 flex h-28 w-full items-center justify-center overflow-hidden rounded border" style={{ borderColor: subBorder, background: 'rgba(0,0,0,.2)' }}>
+              <input
+                aria-label="图名"
+                className="nodrag absolute left-2 top-2 z-10 h-6 max-w-[180px] rounded border border-white/15 bg-black/55 px-1.5 text-[10px] font-semibold text-white outline-none"
+                value={activeBlock.imageName}
+                placeholder="图名"
+                onChange={(e) => patchBlock(activeBlock.id, { imageName: sanitizeTimelineImageName(e.target.value, activeBlock.imageUrl, activeIndex) })}
+              />
+              {activeBlock.imageUrl ? <SmartImage src={activeBlock.imageUrl} alt="" className="h-full w-full object-contain" /> : <span className="text-[11px] opacity-40">未设关键帧图</span>}
             </div>
 
             {/* 换图来源 */}
@@ -1070,12 +1044,7 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
             <input ref={uploadVideoRef} type="file" accept="video/*" multiple className="hidden" onChange={(event) => handleUpload('video', event)} />
             <input ref={uploadAudioRef} type="file" accept="audio/*" multiple className="hidden" onChange={(event) => handleUpload('audio', event)} />
 
-            <div className="mt-2 rounded border p-1.5" style={{ borderColor: subBorder }}>
-              <div className="mb-1 text-[10px] font-semibold" style={mutedStyle}>全局视频/音频参考</div>
-              {renderReferencePool()}
-            </div>
-
-            {/* 过渡描述(末帧无) */}
+            {/* 描述(末帧无) */}
             {!isLastActive && (
               <div>
                 <div className="mb-1 text-[10px]" style={mutedStyle}>描述词</div>
@@ -1088,6 +1057,8 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
                   isDark={isDark}
                   isPixel={isPixel}
                   expandable
+                  promptTemplateKind="video"
+                  title="描述词"
                 />
               </div>
             )}
@@ -1096,7 +1067,7 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
             <div className="grid grid-cols-4 gap-1.5 mt-2">
               <button type="button" disabled={activeIndex === 0} className={btnCls} style={{ borderColor: border }} onClick={() => moveBlock(activeBlock.id, -1)}><ArrowLeft size={12} /> 左移</button>
               <button type="button" disabled={activeIndex === blocks.length - 1} className={btnCls} style={{ borderColor: border }} onClick={() => moveBlock(activeBlock.id, 1)}>右移 <ArrowRight size={12} /></button>
-              <button type="button" disabled={blocks.length >= MAX_FRAMES} className={btnCls} style={{ borderColor: border }} onClick={() => duplicateBlock(activeBlock.id)}><Copy size={12} /> 复制</button>
+              <button type="button" disabled={!canAddBlock} className={btnCls} style={{ borderColor: border }} onClick={() => duplicateBlock(activeBlock.id)}><Copy size={12} /> 复制</button>
               <button type="button" disabled={blocks.length <= 2} className={btnCls} style={{ borderColor: border }} onClick={() => removeBlock(activeBlock.id)}><Trash2 size={12} className="text-rose-400" /> 删除</button>
             </div>
           </div>
@@ -1104,31 +1075,19 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
           <div className="text-[11px] opacity-50 text-center py-2">点上方帧块进行编辑</div>
         )}
 
-        <div className={cardCls} style={cardStyle}>
-          <div className="mb-2 text-[10px]" style={mutedStyle}>全局风格(选填,拼到每段尾)</div>
-          <input
-            className={`${controlCls} w-full text-xs`}
-            style={inputStyle}
-            value={globalStyle}
-            placeholder="如: 电影感, 8k, 暖色调"
-            onChange={(e) => update({ globalStyle: e.target.value })}
-          />
-        </div>
-
         <details className={cardCls} style={cardStyle}>
           <summary className="cursor-pointer text-[11px]" style={mutedStyle}>实际发送({blocks.length}帧 / {totalDuration}s)</summary>
           <div className="mt-2 space-y-1 text-[10px]" style={mutedStyle}>
+            <div className="rounded border px-2 py-1" style={{ borderColor: subBorder }}>
+              图片：{compiled.images.filter(Boolean).length} 张，经 --images 按顺序发送
+            </div>
             {(compiled.videos.length > 0 || compiled.audios.length > 0) && (
               <div className="rounded border px-2 py-1" style={{ borderColor: subBorder }}>
                 全局参考：{compiled.videos.length} 视频 / {compiled.audios.length} 音频
               </div>
             )}
-            {compiled.transitionPrompts.map((p, i) => (
-              <div key={i}>
-                <div className="font-semibold">第{i + 1}段 · {compiled.transitionDurations[i]}s</div>
-                <div>{p || '(空)'}</div>
-              </div>
-            ))}
+            <div className="font-semibold">Prompt</div>
+            <div className="whitespace-pre-wrap">{compiled.prompt || '(空)'}</div>
           </div>
         </details>
 

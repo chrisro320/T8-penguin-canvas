@@ -1,7 +1,6 @@
 import type { GenerateExternalVideoRequest } from '../services/generation';
 import type { MediaMention } from '../components/nodes/mediaMentions';
 
-export type TimelineFrameImageRole = 'keyframe' | 'character' | 'environment-720' | 'storyboard' | 'reference';
 export type TimelineDirectorLlmMode = 'segment' | 'full';
 
 export interface TimelineDirectorBlockInput {
@@ -9,7 +8,8 @@ export interface TimelineDirectorBlockInput {
   title?: string;
   imageUrl?: string;
   imageName?: string;
-  imageRole?: TimelineFrameImageRole;
+  /** Legacy field kept only so older canvases can load. It is not sent to Jimeng. */
+  imageRole?: unknown;
   prompt?: string;
   mentions?: MediaMention[];
   durationSec?: number;
@@ -21,7 +21,6 @@ export interface TimelineDirectorBlock {
   imageUrl: string;
   imageName: string;
   mentionToken: string;
-  imageRole: TimelineFrameImageRole;
   prompt: string;
   mentions: MediaMention[];
   durationSec: number;
@@ -35,7 +34,9 @@ export interface TimelineDirectorRequestOptions {
   resolution?: string;
   generateAudio?: boolean;
   seed?: number;
-  globalStyle?: string;
+  globalPrompt?: string;
+  /** Legacy field kept so older callers/tests can pass it; ignored by timeline director. */
+  globalStyle?: unknown;
   videos?: string[];
   audios?: string[];
   providerParams?: Record<string, any>;
@@ -45,41 +46,15 @@ export interface TimelineDirectorCompiledSegment {
   index: number;
   fromToken: string;
   toToken: string;
-  fromRoleLabel: string;
-  toRoleLabel: string;
   durationSec: number;
   description: string;
   prompt: string;
-}
-
-export function buildTimelineDirectorGlobalPrefix(
-  input: TimelineDirectorBlockInput[],
-  options: { globalStyle?: string } = {},
-): string {
-  const blocks = sanitizeTimelineDirectorBlocks(input);
-  const globalStyle = cleanText(options.globalStyle, 1000);
-  const rolePairs = blocks
-    .filter((block) => block.imageRole !== 'keyframe')
-    .map((block) => `${block.mentionToken}=${timelineImageRoleLabel(block.imageRole)}`);
-  const parts = [
-    globalStyle ? `全局要求：${globalStyle}` : '',
-    rolePairs.length ? `素材定位：${rolePairs.join('；')}` : '',
-  ].filter(Boolean);
-  return parts.join('\n');
 }
 
 export const TIMELINE_DIRECTOR_MIN_SEGMENT_DURATION_SEC = 0.5;
 export const TIMELINE_DIRECTOR_MAX_SEGMENT_DURATION_SEC = 8;
 export const TIMELINE_DIRECTOR_MIN_TOTAL_DURATION_SEC = 4;
 export const TIMELINE_DIRECTOR_MAX_TOTAL_DURATION_SEC = 15;
-
-const ROLE_LABELS: Record<TimelineFrameImageRole, string> = {
-  keyframe: '关键帧图',
-  character: '人设图',
-  'environment-720': '720环境图',
-  storyboard: '故事板图',
-  reference: '参考图',
-};
 
 function cleanText(value: unknown, max = 240): string {
   return typeof value === 'string'
@@ -99,16 +74,6 @@ function cleanStringArray(value: unknown): string[] {
     out.push(clean);
   }
   return out;
-}
-
-function cleanRole(value: unknown): TimelineFrameImageRole {
-  return value === 'character'
-    || value === 'environment-720'
-    || value === 'storyboard'
-    || value === 'reference'
-    || value === 'keyframe'
-    ? value
-    : 'keyframe';
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -212,6 +177,10 @@ function stripImageExt(value: string): string {
   return value.replace(/\.(png|jpe?g|webp|gif|bmp|avif|tiff?)$/i, '');
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 export function sanitizeTimelineImageName(input: unknown, fallbackUrl?: string, fallbackIndex = 0): string {
   const raw = cleanText(input, 80) || stripImageExt(basenameFromUrl(String(fallbackUrl || '')));
   const normalized = raw
@@ -229,10 +198,6 @@ export function timelineMentionToken(imageName: string): string {
   return `@${sanitizeTimelineImageName(imageName)}`;
 }
 
-export function timelineImageRoleLabel(role: TimelineFrameImageRole): string {
-  return ROLE_LABELS[role] || ROLE_LABELS.keyframe;
-}
-
 export function sanitizeTimelineDirectorBlocks(input: TimelineDirectorBlockInput[]): TimelineDirectorBlock[] {
   const source = Array.isArray(input) ? input : [];
   return source.slice(0, 9).map((block, index) => {
@@ -245,7 +210,6 @@ export function sanitizeTimelineDirectorBlocks(input: TimelineDirectorBlockInput
       imageUrl,
       imageName,
       mentionToken: timelineMentionToken(imageName),
-      imageRole: cleanRole(block.imageRole),
       prompt: cleanText(block.prompt, 4000),
       mentions: Array.isArray(block.mentions) ? block.mentions : [],
       durationSec: sanitizeTimelineSegmentDuration(block.durationSec),
@@ -255,10 +219,8 @@ export function sanitizeTimelineDirectorBlocks(input: TimelineDirectorBlockInput
 
 export function buildTimelineDirectorSegments(
   input: TimelineDirectorBlockInput[],
-  options: { globalStyle?: string } = {},
 ): TimelineDirectorCompiledSegment[] {
   const blocks = sanitizeTimelineDirectorBlocks(input);
-  const globalStyle = cleanText(options.globalStyle, 1000);
   const segments: TimelineDirectorCompiledSegment[] = [];
 
   for (let index = 0; index < blocks.length - 1; index += 1) {
@@ -266,8 +228,6 @@ export function buildTimelineDirectorSegments(
     const to = blocks[index + 1];
     const description = from.prompt || '按两张关键帧图自然生成连续视频内容';
     const durationSec = sanitizeTimelineSegmentDuration(from.durationSec);
-    const fromRoleLabel = timelineImageRoleLabel(from.imageRole);
-    const toRoleLabel = timelineImageRoleLabel(to.imageRole);
     const parts = [
       `${from.mentionToken} -> ${to.mentionToken}`,
       `时长：${durationSec}秒`,
@@ -277,8 +237,6 @@ export function buildTimelineDirectorSegments(
       index,
       fromToken: from.mentionToken,
       toToken: to.mentionToken,
-      fromRoleLabel,
-      toRoleLabel,
       durationSec,
       description,
       prompt: parts.join('\n'),
@@ -286,6 +244,40 @@ export function buildTimelineDirectorSegments(
   }
 
   return segments;
+}
+
+function dreaminaFrameLabel(block: TimelineDirectorBlock, index: number): string {
+  return `第${index + 1}帧（${block.imageName}）`;
+}
+
+function replaceTimelineImageTokensForDreamina(text: string, blocks: TimelineDirectorBlock[]): string {
+  let next = cleanText(text, 8000);
+  for (const [index, block] of blocks.entries()) {
+    const token = block.mentionToken;
+    if (!token) continue;
+    next = next.replace(new RegExp(escapeRegExp(token), 'g'), dreaminaFrameLabel(block, index));
+  }
+  return next.trim();
+}
+
+export function buildTimelineDirectorCompiledPrompt(
+  input: TimelineDirectorBlockInput[],
+  options: { globalPrompt?: string } = {},
+): string {
+  const blocks = sanitizeTimelineDirectorBlocks(input);
+  const segments = buildTimelineDirectorSegments(blocks);
+  return [
+    replaceTimelineImageTokensForDreamina(String(options.globalPrompt || ''), blocks),
+    ...segments.map((segment) => {
+      const from = blocks[segment.index];
+      const to = blocks[segment.index + 1];
+      return [
+        `第${segment.index + 1}段：${dreaminaFrameLabel(from, segment.index)} -> ${dreaminaFrameLabel(to, segment.index + 1)}`,
+        `时长：${segment.durationSec}秒`,
+        replaceTimelineImageTokensForDreamina(segment.description, blocks),
+      ].join('\n');
+    }),
+  ].filter(Boolean).join('\n\n');
 }
 
 export function buildTimelineDirectorExternalVideoRequest(
@@ -296,11 +288,13 @@ export function buildTimelineDirectorExternalVideoRequest(
   const images = blocks.map((block) => block.imageUrl).filter(Boolean);
   const videos = cleanStringArray(options.videos);
   const audios = cleanStringArray(options.audios);
-  const segments = buildTimelineDirectorSegments(blocks, { globalStyle: options.globalStyle });
-  const transitionPrompts = segments.map((segment) => segment.prompt);
+  const segments = buildTimelineDirectorSegments(blocks);
+  const fullPrompt = buildTimelineDirectorCompiledPrompt(blocks, {
+    globalPrompt: options.globalPrompt,
+  }) || '多关键帧时间轴视频';
+  const transitionPrompts = segments.map(() => fullPrompt);
   const transitionDurations = segments.map((segment) => segment.durationSec);
   const duration = round1(transitionDurations.reduce((sum, value) => sum + value, 0));
-  const globalPrefix = buildTimelineDirectorGlobalPrefix(blocks, { globalStyle: options.globalStyle });
   const providerParams = {
     ...(options.providerParams || {}),
     frameMode: 'multiframe',
@@ -310,8 +304,6 @@ export function buildTimelineDirectorExternalVideoRequest(
     timelineFrames: blocks.map((block) => ({
       token: block.mentionToken,
       imageName: block.imageName,
-      imageRole: block.imageRole,
-      imageRoleLabel: timelineImageRoleLabel(block.imageRole),
       imageUrl: block.imageUrl,
     })),
     timelineReferenceVideos: videos,
@@ -322,7 +314,7 @@ export function buildTimelineDirectorExternalVideoRequest(
     providerId: options.providerId,
     providerModel: options.providerModel,
     model: options.model || options.providerModel,
-    prompt: [globalPrefix, ...transitionPrompts].filter(Boolean).join('\n\n') || '多关键帧时间轴视频',
+    prompt: fullPrompt,
     aspect_ratio: options.aspectRatio,
     duration,
     resolution: options.resolution,
@@ -336,23 +328,27 @@ export function buildTimelineDirectorExternalVideoRequest(
 
 export function buildTimelineDirectorLlmOptimizationPrompt(
   input: TimelineDirectorBlockInput[],
-  options: { mode?: TimelineDirectorLlmMode; globalStyle?: string } = {},
+  options: { mode?: TimelineDirectorLlmMode; globalPrompt?: string; globalStyle?: unknown } = {},
 ): { system: string; user: string } {
   const blocks = sanitizeTimelineDirectorBlocks(input);
-  const segments = buildTimelineDirectorSegments(blocks, { globalStyle: options.globalStyle });
+  const segments = buildTimelineDirectorSegments(blocks);
   const mode = options.mode === 'full' ? 'full' : 'segment';
   const system = [
     '你是专业视频导演和提示词工程师。',
     '任务：优化时间分镜描述，用于即梦 Seedance 多关键帧视频生成。',
-    '必须保留所有 @图片名、图片定位和时长约束；不要把 @图片名改成 URL；不要删除“关键帧图/图片定位/时长约束/描述词”的语义。',
+    '必须保留所有 @图片名和时长，不要把 @图片名改成 URL。',
     '只优化描述词和镜头语言，让主体动作、环境变化、构图、光影、节奏更清楚。',
     mode === 'full' ? '输出格式：逐段输出，严格使用“第N段：优化后的描述词”。' : '输出格式：只输出优化后的描述词，不要加解释。',
   ].join('\n');
   const user = [
     `优化模式：${mode === 'full' ? '全文时间分镜脚本优化' : '单段时间分镜描述优化'}`,
     `总时长：${round1(segments.reduce((sum, segment) => sum + segment.durationSec, 0))}s`,
-    options.globalStyle ? `全局风格：${cleanText(options.globalStyle, 1000)}` : '',
-    ...segments.map((segment) => `第${segment.index + 1}段：关键帧图：${segment.fromToken} → ${segment.toToken}｜图片定位：${segment.fromToken}=${segment.fromRoleLabel}；${segment.toToken}=${segment.toRoleLabel}｜时长约束：${segment.durationSec}s｜描述词：${segment.description}`),
+    cleanText(options.globalPrompt, 8000) ? `全局提示词：\n${cleanText(options.globalPrompt, 8000)}` : '',
+    ...segments.map((segment) => [
+      `第${segment.index + 1}段：${segment.fromToken} -> ${segment.toToken}`,
+      `时长：${segment.durationSec}秒`,
+      segment.description,
+    ].join('\n')),
   ].filter(Boolean).join('\n');
   return { system, user };
 }

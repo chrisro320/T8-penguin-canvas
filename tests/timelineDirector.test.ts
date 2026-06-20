@@ -20,7 +20,6 @@ test('timeline director compiles keyframe names roles durations and prompts into
       title: '女主设定',
       imageUrl: '/files/input/hero.png',
       imageName: '女主A',
-      imageRole: 'character',
       durationSec: 0.2,
       prompt: '女主从画面左侧转身看向镜头',
     },
@@ -29,7 +28,6 @@ test('timeline director compiles keyframe names roles durations and prompts into
       title: '720环境图',
       imageUrl: '/files/input/env.png',
       imageName: '室内大厅720',
-      imageRole: 'environment-720',
       durationSec: 9.3,
       prompt: '镜头推入大厅，保持人物身份一致',
     },
@@ -38,7 +36,6 @@ test('timeline director compiles keyframe names roles durations and prompts into
       title: '故事板03',
       imageUrl: '/files/input/storyboard.png',
       imageName: '故事板03',
-      imageRole: 'storyboard',
       durationSec: 4,
       prompt: '末帧不发送',
     },
@@ -50,7 +47,8 @@ test('timeline director compiles keyframe names roles durations and prompts into
     model: 'seedance2.0fast_vip',
     generateAudio: true,
     seed: 42,
-    globalStyle: '电影感，暖色光',
+    globalStyle: '这个旧字段不应该被拼进请求',
+    globalPrompt: '@女主A 保持身份一致；室内暖光。',
     videos: ['/files/input/ref-video.mp4'],
     audios: ['/files/input/ref-audio.wav'],
   });
@@ -66,12 +64,11 @@ test('timeline director compiles keyframe names roles durations and prompts into
   assert.deepEqual(request.providerParams?.timelineReferenceVideos, ['/files/input/ref-video.mp4']);
   assert.deepEqual(request.providerParams?.timelineReferenceAudios, ['/files/input/ref-audio.wav']);
   assert.equal(request.providerParams?.transitionPrompts.length, 2);
-  assert.equal(request.providerParams?.transitionPrompts[0], '@女主A -> @室内大厅720\n时长：0.5秒\n女主从画面左侧转身看向镜头');
-  assert.equal(request.providerParams?.transitionPrompts[1], '@室内大厅720 -> @故事板03\n时长：8秒\n镜头推入大厅，保持人物身份一致');
-  assert.doesNotMatch(request.providerParams?.transitionPrompts[0], /关键帧图|图片定位|时长约束|描述词/);
-  assert.match(request.prompt, /全局要求：电影感，暖色光/);
-  assert.match(request.prompt, /素材定位：@女主A=人设图；@室内大厅720=720环境图；@故事板03=故事板图/);
-  assert.equal((request.prompt.match(/素材定位/g) || []).length, 1);
+  assert.equal(request.prompt, '第1帧（女主A） 保持身份一致；室内暖光。\n\n第1段：第1帧（女主A） -> 第2帧（室内大厅720）\n时长：0.5秒\n女主从画面左侧转身看向镜头\n\n第2段：第2帧（室内大厅720） -> 第3帧（故事板03）\n时长：8秒\n镜头推入大厅，保持人物身份一致');
+  assert.deepEqual(request.providerParams?.transitionPrompts, [request.prompt, request.prompt]);
+  assert.doesNotMatch(request.prompt, /全局要求|素材定位|图片定位|关键帧图|人设图|720环境图|故事板图|这个旧字段/);
+  assert.doesNotMatch(request.prompt, /@女主A|@室内大厅720|@故事板03/);
+  assert.equal((request.prompt.match(/第1帧（女主A）/g) || []).length, 2);
 });
 
 test('timeline director sanitizes legacy blocks and keeps stable @ tokens from image names', () => {
@@ -82,10 +79,8 @@ test('timeline director sanitizes legacy blocks and keeps stable @ tokens from i
 
   assert.equal(first.imageName, '角色图');
   assert.equal(first.mentionToken, '@角色图');
-  assert.equal(first.imageRole, 'keyframe');
   assert.equal(second.imageName, 'scene_01');
   assert.equal(second.mentionToken, '@scene_01');
-  assert.equal(second.imageRole, 'environment-720');
 });
 
 test('timeline director enforces total duration between 4 and 15 seconds while editing', () => {
@@ -138,16 +133,16 @@ test('timeline director LLM optimization prompt is a real time-storyboard script
       durationSec: 2,
       prompt: '走入大厅',
     },
-  ], { mode: 'full', globalStyle: '写实电影感' });
+  ], { mode: 'full', globalStyle: '写实电影感', globalPrompt: '@女主A 保持红色外套' });
 
   assert.match(system, /时间分镜描述/);
   assert.match(system, /保留所有 @图片名/);
   assert.match(user, /第1段/);
-  assert.match(user, /关键帧图：@女主A → @大厅720/);
-  assert.match(user, /图片定位：@女主A=人设图；@大厅720=720环境图/);
-  assert.match(user, /时长约束：1\.2s/);
-  assert.match(user, /描述词：转身/);
-  assert.match(user, /写实电影感/);
+  assert.match(user, /@女主A -> @大厅720/);
+  assert.match(user, /时长：1\.2秒/);
+  assert.match(user, /转身/);
+  assert.match(user, /@女主A 保持红色外套/);
+  assert.doesNotMatch(user, /关键帧图|图片定位|时长约束|描述词|写实电影感/);
 });
 
 test('timeline director frontend exposes storyboard-aligned controls without shot override and bridge clutter', () => {
@@ -159,8 +154,13 @@ test('timeline director frontend exposes storyboard-aligned controls without sho
   assert.match(node, /时间轴导演台/);
   assert.match(node, /高级来源/);
   assert.match(node, /秒级时间线/);
-  assert.match(node, /加分镜/);
-  assert.match(node, /S\$\{activeIndex \+ 1\}/);
+  assert.match(node, /全局提示词/);
+  assert.match(node, /globalPrompt/);
+  assert.match(node, /globalPromptMentions/);
+  assert.match(node, /加关键帧/);
+  assert.match(node, /canAddBlock/);
+  assert.match(node, /totalDuration < MAX_TOTAL/);
+  assert.match(node, /F\$\{activeIndex \+ 1\}/);
   assert.match(node, /生成全部/);
   assert.match(node, /已输出/);
   assert.match(node, /重新获取/);
@@ -171,10 +171,17 @@ test('timeline director frontend exposes storyboard-aligned controls without sho
   assert.match(node, /资源图/);
   assert.match(node, /资源视频/);
   assert.match(node, /资源音频/);
-  assert.match(node, /图片定位/);
-  assert.match(node, /关键帧图/);
+  assert.match(node, /aria-label="图名"/);
   assert.match(node, /描述词/);
   assert.match(node, /实际发送/);
+  assert.match(node, /promptTemplateKind="video"/);
+  assert.match(node, /onKeyDownCapture/);
+  assert.match(node, /removeBlock\(activeBlock\.id\)/);
+  assert.doesNotMatch(node, /图片定位/);
+  assert.doesNotMatch(node, /人设图|720环境图|故事板图|参考图/);
+  assert.doesNotMatch(node, /全局风格/);
+  assert.doesNotMatch(node, /全局视频\/音频参考|暂无全局视频\/音频参考/);
+  assert.doesNotMatch(node, /加分镜|S\$\{activeIndex \+ 1\}|关键帧图名/);
   assert.doesNotMatch(node, /上游图/);
   assert.doesNotMatch(node, /镜头覆盖/);
   assert.doesNotMatch(node, /首尾帧桥接/);
