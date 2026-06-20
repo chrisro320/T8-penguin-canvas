@@ -492,10 +492,10 @@ test('Jimeng Seedance multiframe keeps per-segment timeline prompts durations an
     providerParams: {
       frameMode: 'multiframe',
       transitionPrompts: [
-        '@女主A -> @大厅720\n时长：0.5秒\n女主转身',
-        '@大厅720 -> @故事板03\n时长：8秒\n镜头推进',
+        '@女主A -> @大厅720\n时长：1秒\n女主转身',
+        '@大厅720 -> @故事板03\n时长：12秒\n镜头推进',
       ],
-      transitionDurations: [0.2, 9.3],
+      transitionDurations: [0.2, 14],
     },
   }, {
     resolveLocalMedia: async (value: string) => value,
@@ -510,13 +510,57 @@ test('Jimeng Seedance multiframe keeps per-segment timeline prompts durations an
   assert.equal(result.ok, true);
   assert.equal(args[0], 'multiframe2video');
   assert.equal(args.filter((arg: string) => arg.startsWith('--transition-prompt=')).length, 2);
-  assert.ok(args.includes('--transition-prompt=@女主A -> @大厅720\n时长：0.5秒\n女主转身'));
-  assert.ok(args.includes('--transition-prompt=@大厅720 -> @故事板03\n时长：8秒\n镜头推进'));
+  assert.ok(args.includes('--transition-prompt=@女主A -> @大厅720\n时长：1秒\n女主转身'));
+  assert.ok(args.includes('--transition-prompt=@大厅720 -> @故事板03\n时长：12秒\n镜头推进'));
   assert.equal(args.some((arg: string) => /关键帧图|图片定位|时长约束|描述词/.test(String(arg))), false);
-  assert.ok(args.includes('--transition-duration=0.5'));
-  assert.ok(args.includes('--transition-duration=8'));
+  assert.ok(args.includes('--transition-duration=1'));
+  assert.ok(args.includes('--transition-duration=12'));
   assert.equal(args.some((arg: string) => String(arg).includes('C:\\tmp\\hero.png') && String(arg).includes('@女主A')), false);
   assert.deepEqual(result.videoUrls, ['/files/output/timeline.mp4']);
+});
+
+test('Jimeng Seedance timeline sends @ image references to Dreamina through multimodal images', async () => {
+  const commands: any[] = [];
+  const provider = {
+    id: 'jimeng-cli',
+    protocol: 'jimeng-cli',
+    videoModels: ['seedance2.0fast_vip'],
+    jimengConfig: { executablePath: 'dreamina', pollSeconds: 20 },
+  };
+
+  const result = await jimengCli.generateVideo(provider, {
+    prompt: '@男主 是男主，保持棕色皮夹克和蓝眼睛。\n\n@镜头1 -> @镜头2\n时长：4秒\n男主走入画面',
+    providerModel: 'seedance2.0fast_vip',
+    duration: 4,
+    resolution: '720p',
+    images: ['C:\\tmp\\male-lead.png', 'C:\\tmp\\shot-1.png', 'C:\\tmp\\shot-2.png'],
+    providerParams: {
+      frameMode: 'omni',
+      timelineReferenceImages: ['C:\\tmp\\male-lead.png'],
+      timelineFrameImages: ['C:\\tmp\\shot-1.png', 'C:\\tmp\\shot-2.png'],
+      transitionPrompts: [
+        '@男主 是男主，保持棕色皮夹克和蓝眼睛。\n\n@镜头1 -> @镜头2\n时长：4秒\n男主走入画面',
+      ],
+      transitionDurations: [4],
+    },
+  }, {
+    resolveLocalMedia: async (value: string) => value,
+    runCli: async (command: string, args: string[]) => {
+      commands.push({ command, args });
+      return { videos: ['C:\\tmp\\timeline-omni.mp4'], submit_id: 'vid-timeline-omni' };
+    },
+    storeOutput: async (value: string) => `/files/output/${value.split('\\').pop()}`,
+  });
+
+  const args = commands[0].args;
+  assert.equal(result.ok, true);
+  assert.equal(args[0], 'multimodal2video');
+  assert.ok(args.includes('--image=C:\\tmp\\male-lead.png'));
+  assert.ok(args.includes('--image=C:\\tmp\\shot-1.png'));
+  assert.ok(args.includes('--image=C:\\tmp\\shot-2.png'));
+  assert.equal(args.some((arg: string) => arg.startsWith('--images=')), false);
+  assert.ok(args.includes('--prompt=@男主 是男主，保持棕色皮夹克和蓝眼睛。\n\n@镜头1 -> @镜头2\n时长：4秒\n男主走入画面'));
+  assert.deepEqual(result.videoUrls, ['/files/output/timeline-omni.mp4']);
 });
 
 test('Jimeng Seedance timeline multiframe keeps video and audio references without switching to multimodal mode', async () => {

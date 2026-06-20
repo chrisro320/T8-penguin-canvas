@@ -37,6 +37,7 @@ export interface TimelineDirectorRequestOptions {
   globalPrompt?: string;
   /** Legacy field kept so older callers/tests can pass it; ignored by timeline director. */
   globalStyle?: unknown;
+  referenceImages?: string[];
   videos?: string[];
   audios?: string[];
   providerParams?: Record<string, any>;
@@ -51,8 +52,8 @@ export interface TimelineDirectorCompiledSegment {
   prompt: string;
 }
 
-export const TIMELINE_DIRECTOR_MIN_SEGMENT_DURATION_SEC = 0.5;
-export const TIMELINE_DIRECTOR_MAX_SEGMENT_DURATION_SEC = 8;
+export const TIMELINE_DIRECTOR_MIN_SEGMENT_DURATION_SEC = 1;
+export const TIMELINE_DIRECTOR_MAX_SEGMENT_DURATION_SEC = 12;
 export const TIMELINE_DIRECTOR_MIN_TOTAL_DURATION_SEC = 4;
 export const TIMELINE_DIRECTOR_MAX_TOTAL_DURATION_SEC = 15;
 
@@ -177,10 +178,6 @@ function stripImageExt(value: string): string {
   return value.replace(/\.(png|jpe?g|webp|gif|bmp|avif|tiff?)$/i, '');
 }
 
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
 export function sanitizeTimelineImageName(input: unknown, fallbackUrl?: string, fallbackIndex = 0): string {
   const raw = cleanText(input, 80) || stripImageExt(basenameFromUrl(String(fallbackUrl || '')));
   const normalized = raw
@@ -191,7 +188,7 @@ export function sanitizeTimelineImageName(input: unknown, fallbackUrl?: string, 
     .replace(/_+/g, '_')
     .replace(/^_+|_+$/g, '')
     .slice(0, 40);
-  return normalized || `frame${fallbackIndex + 1}`;
+  return normalized || `shot${fallbackIndex + 1}`;
 }
 
 export function timelineMentionToken(imageName: string): string {
@@ -203,9 +200,9 @@ export function sanitizeTimelineDirectorBlocks(input: TimelineDirectorBlockInput
   return source.slice(0, 9).map((block, index) => {
     const imageUrl = cleanText(block.imageUrl, 20_000);
     const imageName = sanitizeTimelineImageName(block.imageName || block.title, imageUrl, index);
-    const title = cleanText(block.title, 80) || imageName || `帧${index + 1}`;
+    const title = cleanText(block.title, 80) || imageName || `镜头${index + 1}`;
     return {
-      id: cleanText(block.id, 96) || `timeline-frame-${index + 1}`,
+      id: cleanText(block.id, 96) || `timeline-shot-${index + 1}`,
       title,
       imageUrl,
       imageName,
@@ -226,7 +223,7 @@ export function buildTimelineDirectorSegments(
   for (let index = 0; index < blocks.length - 1; index += 1) {
     const from = blocks[index];
     const to = blocks[index + 1];
-    const description = from.prompt || '按两张关键帧图自然生成连续视频内容';
+    const description = from.prompt || '按两张镜头图自然生成连续视频内容';
     const durationSec = sanitizeTimelineSegmentDuration(from.durationSec);
     const parts = [
       `${from.mentionToken} -> ${to.mentionToken}`,
@@ -246,20 +243,6 @@ export function buildTimelineDirectorSegments(
   return segments;
 }
 
-function dreaminaFrameLabel(block: TimelineDirectorBlock, index: number): string {
-  return `第${index + 1}帧（${block.imageName}）`;
-}
-
-function replaceTimelineImageTokensForDreamina(text: string, blocks: TimelineDirectorBlock[]): string {
-  let next = cleanText(text, 8000);
-  for (const [index, block] of blocks.entries()) {
-    const token = block.mentionToken;
-    if (!token) continue;
-    next = next.replace(new RegExp(escapeRegExp(token), 'g'), dreaminaFrameLabel(block, index));
-  }
-  return next.trim();
-}
-
 export function buildTimelineDirectorCompiledPrompt(
   input: TimelineDirectorBlockInput[],
   options: { globalPrompt?: string } = {},
@@ -267,15 +250,9 @@ export function buildTimelineDirectorCompiledPrompt(
   const blocks = sanitizeTimelineDirectorBlocks(input);
   const segments = buildTimelineDirectorSegments(blocks);
   return [
-    replaceTimelineImageTokensForDreamina(String(options.globalPrompt || ''), blocks),
+    cleanText(options.globalPrompt, 8000),
     ...segments.map((segment) => {
-      const from = blocks[segment.index];
-      const to = blocks[segment.index + 1];
-      return [
-        `第${segment.index + 1}段：${dreaminaFrameLabel(from, segment.index)} -> ${dreaminaFrameLabel(to, segment.index + 1)}`,
-        `时长：${segment.durationSec}秒`,
-        replaceTimelineImageTokensForDreamina(segment.description, blocks),
-      ].join('\n');
+      return segment.prompt;
     }),
   ].filter(Boolean).join('\n\n');
 }
@@ -285,22 +262,26 @@ export function buildTimelineDirectorExternalVideoRequest(
   options: TimelineDirectorRequestOptions,
 ): GenerateExternalVideoRequest {
   const blocks = sanitizeTimelineDirectorBlocks(input);
-  const images = blocks.map((block) => block.imageUrl).filter(Boolean);
+  const timelineImages = blocks.map((block) => block.imageUrl).filter(Boolean);
+  const referenceImages = cleanStringArray(options.referenceImages);
+  const images = referenceImages.length ? [...referenceImages, ...timelineImages] : timelineImages;
   const videos = cleanStringArray(options.videos);
   const audios = cleanStringArray(options.audios);
   const segments = buildTimelineDirectorSegments(blocks);
   const fullPrompt = buildTimelineDirectorCompiledPrompt(blocks, {
     globalPrompt: options.globalPrompt,
-  }) || '多关键帧时间轴视频';
+  }) || '多镜头时间轴视频';
   const transitionPrompts = segments.map(() => fullPrompt);
   const transitionDurations = segments.map((segment) => segment.durationSec);
   const duration = round1(transitionDurations.reduce((sum, value) => sum + value, 0));
   const providerParams = {
     ...(options.providerParams || {}),
-    frameMode: 'multiframe',
+    frameMode: referenceImages.length ? 'omni' : 'multiframe',
     generate_audio: options.generateAudio !== false,
     transitionPrompts,
     transitionDurations,
+    timelineFrameImages: timelineImages,
+    timelineReferenceImages: referenceImages,
     timelineFrames: blocks.map((block) => ({
       token: block.mentionToken,
       imageName: block.imageName,
@@ -335,7 +316,7 @@ export function buildTimelineDirectorLlmOptimizationPrompt(
   const mode = options.mode === 'full' ? 'full' : 'segment';
   const system = [
     '你是专业视频导演和提示词工程师。',
-    '任务：优化时间分镜描述，用于即梦 Seedance 多关键帧视频生成。',
+    '任务：优化时间分镜描述，用于即梦 Seedance 多镜头视频生成。',
     '必须保留所有 @图片名和时长，不要把 @图片名改成 URL。',
     '只优化描述词和镜头语言，让主体动作、环境变化、构图、光影、节奏更清楚。',
     mode === 'full' ? '输出格式：逐段输出，严格使用“第N段：优化后的描述词”。' : '输出格式：只输出优化后的描述词，不要加解释。',

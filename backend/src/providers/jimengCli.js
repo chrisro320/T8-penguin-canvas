@@ -170,7 +170,7 @@ function transitionDuration(totalDuration, transitionCount) {
   const count = Math.max(1, Number(transitionCount) || 1);
   const total = Number(totalDuration || 5);
   const each = (Number.isFinite(total) ? total : 5) / count;
-  return Math.max(0.5, Math.min(8, each));
+  return Math.max(1, Math.min(12, each));
 }
 
 function wslPath(provider, value) {
@@ -717,7 +717,7 @@ async function generateVideo(provider, input = {}, options = {}) {
       };
       const segDuration = (i) => {
         const raw = tDurations && Number.isFinite(Number(tDurations[i])) ? Number(tDurations[i]) : transitionDuration(duration, segCount);
-        return Math.max(0.5, Math.min(8, raw));
+        return Math.max(1, Math.min(12, raw));
       };
       if (paths.length === 2) {
         args.push(`--prompt=${segPrompt(0)}`, `--duration=${segDuration(0)}`);
