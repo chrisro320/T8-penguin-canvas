@@ -109,7 +109,7 @@ export default function RadialMenuSettingsModal({ open, onClose }: RadialMenuSet
       data-canvas-floating-ui="radial-settings-panel"
       role="dialog"
       aria-modal="false"
-      aria-label="中键圆盘设置"
+      aria-label="右键圆盘设置"
       onPointerDown={(event) => event.stopPropagation()}
       onMouseDown={(event) => event.stopPropagation()}
       onContextMenu={(event) => event.preventDefault()}
@@ -118,7 +118,7 @@ export default function RadialMenuSettingsModal({ open, onClose }: RadialMenuSet
       <div className="t8-radial-settings-panel__header">
         <div className="min-w-0">
           <div className="t8-radial-settings-panel__eyebrow">RADIAL MENU</div>
-          <h2>中键圆盘设置</h2>
+          <h2>右键圆盘设置</h2>
         </div>
         <div className="t8-radial-settings-panel__header-actions">
           <button type="button" className="t8-radial-settings-button" onClick={resetRadialMenu} title="恢复默认槽位">
@@ -134,7 +134,7 @@ export default function RadialMenuSettingsModal({ open, onClose }: RadialMenuSet
       <div className="t8-radial-settings-panel__body">
         <div className="t8-radial-settings-delay">
           <div className="t8-radial-settings-delay__meta">
-            <span>长按鼠标中键呼出</span>
+            <span>长按鼠标右键呼出</span>
             <strong>{longPressMs}ms</strong>
           </div>
           <input

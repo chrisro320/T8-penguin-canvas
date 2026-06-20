@@ -267,7 +267,7 @@ export default function CanvasToolbar({
     [`拖线中 ${shortcutText('connection.pan-mode')}`, '开启/关闭连线导航模式'],
     ['左键拖动空白', '平移画布'],
     ['Ctrl + 左键拖动', '框选多个节点'],
-    ['中键长按空白', '打开节点圆盘'],
+    ['右键长按空白', '打开节点圆盘'],
     ['右键点击节点 / 选区', '弹出菜单'],
     ['滚轮 / 触控板', '缩放画布'],
     [`${shortcutText('connection.pan-mode')} + 拖拽`, '平移画布(备选)'],
@@ -827,7 +827,7 @@ export default function CanvasToolbar({
                 >
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <span className={isPixel ? 'text-[var(--px-ink-soft)]' : isDark ? 'text-white/65' : 'text-zinc-600'}>
-                      中键长按画布空白区后滑向方向，松开创建节点；拖动行可调整方向顺序。
+                      右键长按画布空白区后滑向方向，松开创建节点；拖动行可调整方向顺序。
                     </span>
                     <label className="inline-flex items-center gap-2 text-[11px]">
                       <span className={isPixel ? 'text-[var(--px-ink-soft)]' : isDark ? 'text-white/55' : 'text-zinc-500'}>
