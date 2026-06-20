@@ -4,7 +4,7 @@ import { useApiKeysStore, FIXED_ZHENZHEN_BASE, RH_BASE } from '../stores/apiKeys
 import { taskCompletionSound as taskCompletionSoundController } from '../stores/taskCompletionSound';
 import { useThemeStore } from '../stores/theme';
 import type { AdvancedProviderConfig, AdvancedProviderProtocol, ApiSettings, CloudUploadProvider, CloudUploadTargetConfig } from '../types/canvas';
-import { getRawSettings, resetTaskCompletionSound, testAdvancedProvider, testCloudUploadTarget, uploadTaskCompletionSound } from '../services/api';
+import { getRawSettings, listAdvancedProviderModels, resetTaskCompletionSound, testAdvancedProvider, testCloudUploadTarget, uploadTaskCompletionSound } from '../services/api';
 import { playTaskCompletionSound } from '../utils/taskCompletionSound';
 import {
   advancedProviderSummary as summarizeAdvancedProviderForm,
@@ -303,6 +303,8 @@ export default function ApiSettingsModal({ open, onClose }: ApiSettingsModalProp
   const [activeAdvancedProviderId, setActiveAdvancedProviderId] = useState<string>('');
   const [advancedDirty, setAdvancedDirty] = useState(false);
   const [advancedTestStatus, setAdvancedTestStatus] = useState<Record<string, { loading?: boolean; ok?: boolean; message?: string }>>({});
+  // 拉取到的模型列表(按 provider id)
+  const [fetchedModels, setFetchedModels] = useState<Record<string, { loading?: boolean; models?: string[]; error?: string }>>({});
   const [advancedComfyDrafts, setAdvancedComfyDrafts] = useState<Record<string, { workflowJson?: string; fields?: string; excludeRules?: string }>>({});
   const [cloudUploadOpen, setCloudUploadOpen] = useState(false);
   const [cloudUploadTargetsInput, setCloudUploadTargetsInput] = useState<CloudUploadTargetConfig[]>([]);
@@ -840,6 +842,29 @@ export default function ApiSettingsModal({ open, onClose }: ApiSettingsModalProp
     setAdvancedProvidersInput((prev) => prev.filter((p) => p.id !== id));
     setActiveAdvancedProviderId('');
     setAdvancedDirty(true);
+  };
+
+  // 从平台拉取模型列表(OpenAI 兼容: GET {baseUrl}/models)。
+  const handleFetchModels = async (provider: AdvancedProviderConfig) => {
+    setFetchedModels((prev) => ({ ...prev, [provider.id]: { loading: true } }));
+    try {
+      const result = await listAdvancedProviderModels({ provider });
+      setFetchedModels((prev) => ({
+        ...prev,
+        [provider.id]: result.ok
+          ? { models: result.models || [] }
+          : { error: result.error || '拉取失败' },
+      }));
+    } catch (e: any) {
+      setFetchedModels((prev) => ({ ...prev, [provider.id]: { error: e?.message || '拉取失败' } }));
+    }
+  };
+
+  // 点击模型 chip,加入/移出该平台的聊天模型列表。
+  const toggleAdvancedChatModel = (provider: AdvancedProviderConfig, model: string) => {
+    const cur = provider.chatModels || [];
+    const next = cur.includes(model) ? cur.filter((m) => m !== model) : [...cur, model];
+    updateAdvancedProvider(provider.id, { chatModels: next });
   };
 
   const handleTestAdvancedProvider = async (provider: AdvancedProviderConfig) => {
@@ -2171,6 +2196,53 @@ export default function ApiSettingsModal({ open, onClose }: ApiSettingsModalProp
                 />
               </label>
             </div>
+            {provider.protocol === 'openai-compatible' && (
+              <div className="mt-3 space-y-2">
+                <button
+                  type="button"
+                  onClick={() => handleFetchModels(provider)}
+                  disabled={!!fetchedModels[provider.id]?.loading}
+                  className={
+                    isPixel
+                      ? 't8-api-settings-secondary-btn px-btn text-[11px] px-2 py-1'
+                      : 't8-api-settings-secondary-btn px-2 py-1 text-[11px] rounded border inline-flex items-center gap-1'
+                  }
+                >
+                  <Download size={12} />
+                  {fetchedModels[provider.id]?.loading ? '拉取中...' : '拉取模型列表'}
+                </button>
+                {fetchedModels[provider.id]?.error && (
+                  <div className="text-[11px] text-red-400">{fetchedModels[provider.id]?.error}</div>
+                )}
+                {fetchedModels[provider.id]?.models && (
+                  <div className="space-y-1.5">
+                    <div className={`text-[11px] ${hintCls}`}>
+                      共 {fetchedModels[provider.id]!.models!.length} 个 · 点击加入「聊天模型」（✓ 已加；图像/视频请手动复制到对应框）
+                    </div>
+                    <div className="flex flex-wrap gap-1.5 max-h-48 overflow-y-auto">
+                      {fetchedModels[provider.id]!.models!.map((m) => {
+                        const added = (provider.chatModels || []).includes(m);
+                        return (
+                          <button
+                            key={m}
+                            type="button"
+                            onClick={() => toggleAdvancedChatModel(provider, m)}
+                            title={added ? '点击移出聊天模型' : '点击加入聊天模型'}
+                            className={
+                              added
+                                ? 'px-2 py-0.5 text-[11px] rounded-full border border-emerald-500/40 text-emerald-400 bg-emerald-500/10 transition'
+                                : `px-2 py-0.5 text-[11px] rounded-full border transition hover:border-white/40 ${hintCls}`
+                            }
+                          >
+                            {added ? '✓ ' : ''}{m}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </AdvancedProviderFormBlock>
         )}
 

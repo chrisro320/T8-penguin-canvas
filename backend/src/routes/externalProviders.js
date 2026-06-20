@@ -9,6 +9,7 @@ const {
   generateChatWithProvider,
   generateImageWithProvider,
   generateVideoWithProvider,
+  listProviderModels,
   testProviderConnection,
 } = require('../providers/adapters');
 
@@ -175,6 +176,41 @@ router.post('/test-provider', async (req, res) => {
     return res.status(500).json({
       success: false,
       code: 'provider_test_failed',
+      error: e?.message || String(e),
+    });
+  }
+});
+
+router.post('/list-models', async (req, res) => {
+  try {
+    const settings = settingsRouter.loadSettings({ persistMigrations: false });
+    const currentProviders = normalizeAdvancedProviders(settings.advancedProviders);
+    const provider = resolveProvider(req.body || {}, currentProviders);
+    if (!provider) {
+      return res.json({
+        success: false,
+        code: 'provider_not_found',
+        error: '未找到扩展平台配置。',
+      });
+    }
+
+    const result = await listProviderModels(provider, {
+      timeoutMs: Number(req.body?.timeoutMs) || undefined,
+    });
+    const data = {
+      ...result,
+      provider: safeProviderForResponse(provider),
+    };
+    return res.json({
+      success: !!result.ok,
+      code: result.code,
+      error: result.ok ? undefined : result.error,
+      data,
+    });
+  } catch (e) {
+    return res.status(500).json({
+      success: false,
+      code: 'provider_list_models_failed',
       error: e?.message || String(e),
     });
   }

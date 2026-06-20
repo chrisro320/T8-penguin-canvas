@@ -30,6 +30,20 @@ async function testProviderConnection(provider, options = {}) {
   return adapter.testProvider(provider, options);
 }
 
+async function listProviderModels(provider, options = {}) {
+  const adapter = getAdapterForProtocol(provider?.protocol);
+  if (!adapter?.listModels) {
+    return {
+      ok: false,
+      code: 'unsupported_list_models',
+      providerId: provider?.id || '',
+      protocol: provider?.protocol || '',
+      error: '该扩展平台暂不支持拉取模型列表。',
+    };
+  }
+  return adapter.listModels(provider, options);
+}
+
 async function generateImageWithProvider(provider, input = {}, options = {}) {
   const adapter = getAdapterForProtocol(provider?.protocol);
   if (!adapter?.generateImage) {
@@ -77,5 +91,6 @@ module.exports = {
   generateImageWithProvider,
   generateVideoWithProvider,
   getAdapterForProtocol,
+  listProviderModels,
   testProviderConnection,
 };

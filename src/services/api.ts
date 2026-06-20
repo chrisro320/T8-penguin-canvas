@@ -193,6 +193,34 @@ export async function testAdvancedProvider(payload: {
   };
 }
 
+export interface AdvancedProviderModelsResult extends AdvancedProviderTestResult {
+  models?: string[];
+}
+
+// 拉取扩展平台的模型列表(OpenAI 兼容平台调 GET {baseUrl}/models)。
+export async function listAdvancedProviderModels(payload: {
+  providerId?: string;
+  provider?: AdvancedProviderConfig;
+}): Promise<AdvancedProviderModelsResult> {
+  const res = await request<{
+    success: boolean;
+    code?: string;
+    error?: string;
+    data?: AdvancedProviderModelsResult;
+  }>(`${BASE}/proxy/external/list-models`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+  if (res.data) return res.data;
+  return {
+    ok: false,
+    code: res.code || 'provider_list_models_failed',
+    providerId: payload.providerId || payload.provider?.id || '',
+    protocol: payload.provider?.protocol || '',
+    error: res.error || '拉取模型列表失败',
+  };
+}
+
 export interface CloudUploadStatus {
   targets: CloudUploadTargetConfig[];
   summary: CloudUploadSummary;

@@ -479,6 +479,56 @@ async function testProvider(provider, options = {}) {
   }
 }
 
+// 拉取该平台的模型列表(GET {baseUrl}/models,OpenAI 标准)。返回模型 id 数组。
+async function listModels(provider, options = {}) {
+  const validation = validateProvider(provider, { apiKeyRequired: true });
+  if (!validation.ok) return validation;
+
+  const url = `${validation.baseUrl}/models`;
+  try {
+    const res = await fetchWithTimeout(url, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${provider.apiKey}` },
+      timeoutMs: options.timeoutMs,
+      fetchImpl: options.fetchImpl,
+    });
+    if (!res.ok) {
+      return {
+        ok: false,
+        code: 'http_error',
+        providerId: provider.id,
+        protocol: provider.protocol,
+        error: `拉取模型列表失败：HTTP ${res.status}`,
+      };
+    }
+    const raw = await responseJson(res);
+    // 兼容 OpenAI {data:[{id}]} 与少数平台直接返回数组 / {models:[...]}。
+    const rawList = Array.isArray(raw) ? raw : (raw.data || raw.models || []);
+    const models = [];
+    for (const item of Array.isArray(rawList) ? rawList : []) {
+      const id = typeof item === 'string' ? item : String(item?.id || item?.model || item?.name || '').trim();
+      if (id && !models.includes(id)) models.push(id);
+    }
+    models.sort((a, b) => a.localeCompare(b));
+    return {
+      ok: true,
+      code: 'listed',
+      providerId: provider.id,
+      protocol: provider.protocol,
+      models,
+      message: `拉取到 ${models.length} 个模型。`,
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      code: e?.name === 'AbortError' ? 'timeout' : 'network_error',
+      providerId: provider.id,
+      protocol: provider.protocol,
+      error: e?.name === 'AbortError' ? '拉取模型列表超时。' : (e?.message || '拉取模型列表失败。'),
+    };
+  }
+}
+
 module.exports = {
   cleanBaseUrl,
   extractChatText,
@@ -488,6 +538,7 @@ module.exports = {
   generateChat,
   generateImage,
   generateVideo,
+  listModels,
   providerEndpointUrl,
   testProvider,
   validateProvider,
