@@ -133,7 +133,7 @@ function collectImageUrls(value, out = []) {
   if (direct) collectImageUrls(direct, out);
   if (value.b64_json || value.base64) out.push(normalizeBase64Image(value.b64_json || value.base64, mime));
 
-  for (const key of ['data', 'images', 'image_urls', 'imageUrls', 'output_images', 'outputs', 'results']) {
+  for (const key of ['data', 'images', 'image_urls', 'imageUrls', 'output_images', 'outputs', 'results', 'result', 'image']) {
     if (Object.prototype.hasOwnProperty.call(value, key)) collectImageUrls(value[key], out);
   }
   return out;
@@ -290,6 +290,66 @@ async function generateChat(provider, input = {}, options = {}) {
   }
 }
 
+// 异步图像任务支持(对齐 t8star 协议: 提交返回 task_id,轮询 /images/tasks/{id})。
+// 不少 OpenAI 兼容中转(moonlyai 等)克隆此协议,图像生成不同步返回 url。
+const IMG_TASK_SUCCESS = ['success', 'completed', 'complete', 'done', 'finished', 'succeeded'];
+const IMG_TASK_FAILURE = ['failure', 'failed', 'error', 'cancelled', 'canceled'];
+
+function extractImageTaskId(raw) {
+  if (!raw || typeof raw !== 'object') return '';
+  const fromObj = (o) => (o && typeof o === 'object' ? (o.task_id || o.taskId || o.id) : '');
+  const candidates = [
+    raw.task_id, raw.taskId,
+    Array.isArray(raw.data) ? fromObj(raw.data[0]) : fromObj(raw.data),
+    raw.id,
+  ];
+  for (const c of candidates) {
+    const s = String(c || '').trim();
+    if (s) return s;
+  }
+  return '';
+}
+
+function imageTaskStatus(raw) {
+  if (!raw || typeof raw !== 'object') return '';
+  const inner = Array.isArray(raw.data) ? (raw.data[0] || {}) : (raw.data && typeof raw.data === 'object' ? raw.data : {});
+  return String(raw.status || inner.status || '').toLowerCase();
+}
+
+async function pollExternalImageTask(provider, baseUrl, taskId, options = {}) {
+  // 轮询端点 = 提交端点 + /{task_id}（对齐 moonlyai 等中转: GET {base}/images/generations/{id}）。
+  const url = `${baseUrl}/images/generations/${encodeURIComponent(taskId)}`;
+  const maxRetries = 150; // 150 × 2s = 5 分钟上限
+  const interval = 2000;
+  for (let i = 0; i < maxRetries; i++) {
+    await new Promise((r) => setTimeout(r, interval));
+    let res;
+    try {
+      res = await fetchWithTimeout(url, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${provider.apiKey}` },
+        timeoutMs: options.timeoutMs,
+        fetchImpl: options.fetchImpl,
+      });
+    } catch (e) {
+      if (e?.name === 'AbortError') continue; // 单次轮询超时,继续重试
+      throw e;
+    }
+    const raw = await responseJson(res);
+    if (!res.ok) return { ok: false, error: `轮询图像任务失败：HTTP ${res.status}`, raw };
+    const urls = extractImageUrls(raw);
+    const status = imageTaskStatus(raw);
+    if (IMG_TASK_SUCCESS.includes(status) || urls.length) {
+      if (!urls.length) return { ok: false, error: '图像任务完成但未返回图片', raw };
+      return { ok: true, urls, raw };
+    }
+    if (IMG_TASK_FAILURE.includes(status)) {
+      return { ok: false, error: raw?.error?.message || raw?.message || '图像任务失败', raw };
+    }
+  }
+  return { ok: false, error: '图像任务轮询超时(5 分钟)' };
+}
+
 async function generateImage(provider, input = {}, options = {}) {
   const validation = validateProvider(provider, { apiKeyRequired: true });
   if (!validation.ok) return validation;
@@ -345,7 +405,18 @@ async function generateImage(provider, input = {}, options = {}) {
         raw,
       };
     }
-    const imageUrls = extractImageUrls(raw);
+    let imageUrls = extractImageUrls(raw);
+    if (!imageUrls.length) {
+      // 同步无图 → 检测异步任务,轮询取结果。
+      const taskId = extractImageTaskId(raw);
+      if (taskId) {
+        const polled = await pollExternalImageTask(provider, validation.baseUrl, taskId, options);
+        if (!polled.ok) {
+          return { ok: false, code: 'image_task_failed', providerId: provider.id, protocol: provider.protocol, error: polled.error, raw: polled.raw || raw };
+        }
+        imageUrls = polled.urls;
+      }
+    }
     if (!imageUrls.length) {
       return { ok: false, code: 'empty_image', providerId: provider.id, protocol: provider.protocol, error: '扩展图像接口没有返回图片。', raw };
     }

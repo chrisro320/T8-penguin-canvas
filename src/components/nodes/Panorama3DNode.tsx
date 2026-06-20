@@ -40,7 +40,14 @@ import {
 } from 'lucide-react';
 import { useRunTrigger } from '../../hooks/useRunTrigger';
 import { uploadDataUrl, uploadFileBlob } from '../../services/imageOps';
-import { generateLlm, queryImageStatus, submitImageAsync } from '../../services/generation';
+import { generateExternalImage, generateLlm, queryImageStatus, submitImageAsync } from '../../services/generation';
+import {
+  advancedProviderModelOptions,
+  advancedProvidersForNode,
+  externalImageSizeFor,
+  resolveAdvancedProviderSelection,
+} from '../../utils/advancedProviders';
+import { useApiKeysStore } from '../../stores/apiKeys';
 import * as api from '../../services/api';
 import { logBus } from '../../stores/logs';
 import { taskCompletionSound } from '../../stores/taskCompletionSound';
@@ -1064,6 +1071,26 @@ const Panorama3DNode = (p: NodeProps) => {
   const viewRef = useRef({ yaw: 0, pitch: 0, fov: 75 });
   const avatarsRef = useRef<PanoramaAvatar[]>([]);
   const d = (p.data as any) || {};
+
+  // 扩展供应商（高级来源）：让 3D全景也能选自定义 OpenAI 兼容平台出图，默认仍走贞贞工坊。
+  const advancedProviders = useApiKeysStore((s) => s.settings.advancedProviders);
+  const imageAdvancedProviders = useMemo(
+    () => advancedProvidersForNode(advancedProviders, 'image'),
+    [advancedProviders],
+  );
+  const providerSelection = useMemo(
+    () => resolveAdvancedProviderSelection(advancedProviders, 'image', {
+      providerSource: d?.providerSource,
+      providerId: d?.providerId,
+      providerModel: d?.providerModel,
+    }),
+    [advancedProviders, d?.providerSource, d?.providerId, d?.providerModel],
+  );
+  const isExternalSelected = providerSelection.available && providerSelection.providerSource !== 'zhenzhen';
+  const externalModelOptions = providerSelection.provider
+    ? advancedProviderModelOptions(providerSelection.provider, 'image')
+    : [];
+  const externalProviderModel = providerSelection.providerModel || externalModelOptions[0] || '';
 
   const connectedSource = upstream.images[0];
   const generationMode = safePanoramaGenerationMode(d.panoramaGenerationMode);
@@ -3470,6 +3497,32 @@ const Panorama3DNode = (p: NodeProps) => {
       `panorama:${p.id.slice(0, 6)}`,
     );
     try {
+      // 选了扩展供应商（高级来源）→ 走外部 OpenAI 兼容图像接口，而非贞贞工坊。
+      if (isExternalSelected && providerSelection.provider) {
+        const providerModel = externalProviderModel;
+        if (!providerModel) throw new Error('扩展平台未配置可用图像模型，请在 API 设置中填写图像模型');
+        const size = externalImageSizeFor('21:9', sizeLevel);
+        logBus.info(
+          `提交3D全景(扩展平台): ${providerSelection.provider.label || providerSelection.provider.id} · ${providerModel} · ${size} 参考图=${request.images.length}`,
+          `panorama:${p.id.slice(0, 6)}`,
+        );
+        const res = await generateExternalImage({
+          providerId: providerSelection.provider.id,
+          providerModel,
+          model: providerModel,
+          prompt: request.prompt,
+          size,
+          images: request.images,
+          n: 1,
+          providerParams: { ...(d?.providerParams || {}) },
+        });
+        const url = res.imageUrls?.[0];
+        if (!url) throw new Error('扩展平台完成但未返回图片');
+        applyGeneratedPanorama(url, { mode, prompt, promptFinal: finalPrompt, sizeLevel, referenceUrl });
+        logBus.success(`3D全景生成完成(扩展平台) → ${url}`, `panorama:${p.id.slice(0, 6)}`);
+        return;
+      }
+
       const submit = await submitImageAsync(request);
       if (submit.sync && submit.urls?.length) {
         applyGeneratedPanorama(submit.urls[0], { mode, prompt, promptFinal: finalPrompt, sizeLevel, referenceUrl });
@@ -4222,10 +4275,68 @@ const Panorama3DNode = (p: NodeProps) => {
             ))}
           </div>
 
+          {panelMode !== 'preview' && imageAdvancedProviders.length > 0 && (
+            <div className="space-y-2 rounded-lg border border-[var(--t8-border)] bg-[var(--t8-bg-panel-muted)] p-2">
+              <button
+                type="button"
+                onClick={() => update({ panoramaAdvancedProviderOpen: !d?.panoramaAdvancedProviderOpen })}
+                className="w-full flex items-center justify-between text-[10px] font-semibold opacity-70 hover:opacity-100"
+              >
+                <span>高级来源</span>
+                <span>{isExternalSelected && providerSelection.provider ? providerSelection.provider.label : '默认贞贞工坊'}</span>
+              </button>
+              {d?.panoramaAdvancedProviderOpen && (
+                <div className="space-y-2">
+                  <div>
+                    <label className="text-[10px] opacity-50 block mb-1">平台</label>
+                    <select
+                      value={isExternalSelected ? providerSelection.providerId : 'zhenzhen'}
+                      onChange={(e) => {
+                        const nextId = e.target.value;
+                        if (nextId === 'zhenzhen') {
+                          update({ providerSource: 'zhenzhen', providerId: '', providerModel: '' });
+                          return;
+                        }
+                        const provider = imageAdvancedProviders.find((item) => item.id === nextId);
+                        if (!provider) return;
+                        const nextModels = advancedProviderModelOptions(provider, 'image');
+                        update({ providerSource: provider.protocol, providerId: provider.id, providerModel: nextModels[0] || '' });
+                      }}
+                      style={{ background: '#18181b', color: '#ffffff' }}
+                      className="w-full rounded border border-white/10 px-2 py-1 text-xs outline-none focus:border-white/30"
+                    >
+                      <option value="zhenzhen" style={{ background: '#18181b', color: '#ffffff' }}>贞贞工坊（默认）</option>
+                      {imageAdvancedProviders.map((provider) => (
+                        <option key={provider.id} value={provider.id} style={{ background: '#18181b', color: '#ffffff' }}>
+                          {provider.label || provider.id}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  {isExternalSelected && providerSelection.provider && (
+                    <div>
+                      <label className="text-[10px] opacity-50 block mb-1">外部图像模型</label>
+                      <select
+                        value={externalProviderModel}
+                        onChange={(e) => update({ providerModel: e.target.value })}
+                        style={{ background: '#18181b', color: '#ffffff' }}
+                        className="w-full rounded border border-white/10 px-2 py-1 text-xs outline-none focus:border-white/30"
+                      >
+                        {externalModelOptions.length === 0 && <option value="">该平台未配置图像模型</option>}
+                        {externalModelOptions.map((m) => (
+                          <option key={m} value={m} style={{ background: '#18181b', color: '#ffffff' }}>{m}</option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
           {panelMode !== 'preview' && (
             <div className="space-y-2 rounded-lg border border-[var(--t8-border)] bg-[var(--t8-bg-panel-muted)] p-2">
               <div className="flex flex-wrap items-center gap-1.5">
-                <span className="rounded-md bg-sky-400/15 px-2 py-1 text-[10px] font-bold text-sky-200">GPT Image 2</span>
+                <span className="rounded-md bg-sky-400/15 px-2 py-1 text-[10px] font-bold text-sky-200">{isExternalSelected ? (externalProviderModel || '扩展平台') : 'GPT Image 2'}</span>
                 <span className="rounded-md bg-amber-400/15 px-2 py-1 text-[10px] font-bold text-amber-200">21:9</span>
                 {PANORAMA_SIZE_LEVELS.map((level) => (
                   <button
