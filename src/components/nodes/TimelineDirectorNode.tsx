@@ -1,12 +1,12 @@
 import { Fragment, memo, useEffect, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent } from 'react';
+import { createPortal } from 'react-dom';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
-import { AlertCircle, ArrowLeft, ArrowRight, Clapperboard, Copy, Image as ImageIcon, Library, Loader2, Music, Plus, Sparkles, Trash2, Video as VideoIcon, Wand2, X } from 'lucide-react';
+import { AlertCircle, ArrowLeft, ArrowRight, Clapperboard, Copy, Image as ImageIcon, Library, Loader2, Music, PanelRightOpen, Plus, RefreshCw, Settings2, Sparkles, Trash2, Video as VideoIcon, Wand2, X } from 'lucide-react';
 import {
   generateExternalVideo,
-  generateLlm,
-  generateExternalLlm,
   uploadFile,
 } from '../../services/generation';
+import { getCodexCliSkills, streamCodexCliAgent, type CodexSkill } from '../../services/codexCli';
 import { useUpdateNodeData } from './useUpdateNodeData';
 import { useThemeStore } from '../../stores/theme';
 import { logBus } from '../../stores/logs';
@@ -18,7 +18,6 @@ import { materialMentionKey, resolveMediaMentions, type MediaMention } from './m
 import * as api from '../../services/api';
 import { taskCompletionSound } from '../../stores/taskCompletionSound';
 import { useApiKeysStore } from '../../stores/apiKeys';
-import { DEFAULT_LLM_MODEL } from '../../providers/models';
 import {
   advancedProviderModelOptions,
   advancedProvidersForNode,
@@ -54,8 +53,15 @@ const MIN_TOTAL = TIMELINE_DIRECTOR_MIN_TOTAL_DURATION_SEC;
 const MAX_TOTAL = TIMELINE_DIRECTOR_MAX_TOTAL_DURATION_SEC;
 const SEG_MIN = TIMELINE_DIRECTOR_MIN_SEGMENT_DURATION_SEC;
 const SEG_MAX = TIMELINE_DIRECTOR_MAX_SEGMENT_DURATION_SEC;
+const TIMELINE_CODEX_DEFAULT_MODEL = 'gpt-5.4-mini';
 const RATIO_OPTIONS = ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9', '9:21', 'adaptive'];
 const RESOLUTION_OPTIONS = ['480p', '720p', 'native1080p', '1080p', '2k', '4k'];
+const CODEX_MODEL_OPTIONS = [
+  { value: TIMELINE_CODEX_DEFAULT_MODEL, label: 'GPT-5.4 mini' },
+  { value: 'gpt-5.4', label: 'GPT-5.4' },
+  { value: 'gpt-5.5', label: 'GPT-5.5' },
+  { value: 'default', label: '默认模型' },
+];
 
 type Block = TimelineDirectorBlock;
 type ReferenceKind = 'image' | 'video' | 'audio';
@@ -102,6 +108,13 @@ function dedupe(values: string[]): string[] {
   return out;
 }
 
+function parseExtraArgs(value: any): string[] {
+  if (Array.isArray(value)) return dedupe(value.map((item) => String(item || '').trim()));
+  const text = String(value || '').trim();
+  if (!text) return [];
+  return text.match(/(?:[^\s"]+|"[^"]*")+/g)?.map((item) => item.replace(/^"|"$/g, '')) || [];
+}
+
 function collectMentionedMedia(mentions: MediaMention[], materials: Material[]) {
   const byKey = new Map<string, Material>();
   for (const material of materials) byKey.set(materialMentionKey(material), material);
@@ -128,6 +141,10 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
   const [resourceLoading, setResourceLoading] = useState(false);
   const [resourceMessage, setResourceMessage] = useState('');
   const [activeId, setActiveId] = useState<string | null>(null);
+  const [previewImageUrl, setPreviewImageUrl] = useState('');
+  const [codexSkills, setCodexSkills] = useState<CodexSkill[]>([]);
+  const [codexSkillLoading, setCodexSkillLoading] = useState(false);
+  const [codexStudioOpen, setCodexStudioOpen] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const elapsedTimer = useRef<number | null>(null);
   const uploadImageRef = useRef<HTMLInputElement | null>(null);
@@ -149,17 +166,13 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
   const llmMode: 'segment' | 'full' = d.llmMode === 'full' ? 'full' : 'segment';
   const ratio: string = d.ratio || '16:9';
   const resolution: string = d.resolution || '720p';
-  const llmProviderSelection = useMemo(
-    () => resolveAdvancedProviderSelection(advancedProviders, 'llm', {
-      providerSource: d?.llmProviderSource,
-      providerId: d?.llmProviderId,
-      providerModel: d?.llmProviderModel,
-    }),
-    [advancedProviders, d?.llmProviderSource, d?.llmProviderId, d?.llmProviderModel],
+  const codexAgentTaskPrompt = typeof d.codexAgentTaskPrompt === 'string' ? d.codexAgentTaskPrompt : '';
+  const selectedCodexSkillNames = useMemo(
+    () => Array.isArray(d.codexSelectedSkillNames)
+      ? d.codexSelectedSkillNames.map((item: any) => String(item || '').trim()).filter(Boolean)
+      : [],
+    [d.codexSelectedSkillNames],
   );
-  const llmProviders = useMemo(() => advancedProvidersForNode(advancedProviders, 'llm'), [advancedProviders]);
-  const llmModelOptions = llmProviderSelection.provider ? advancedProviderModelOptions(llmProviderSelection.provider, 'llm') : [];
-  const llmProviderModel = llmProviderSelection.providerModel || llmModelOptions[0] || '';
   const status: 'idle' | 'running' | 'success' | 'error' = d.status || 'idle';
   const videoUrl: string | undefined = d.videoUrl;
 
@@ -185,10 +198,19 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
   const providerModel = d?.providerModel || selection.providerModel || externalModelOptions[0] || 'seedance2.0fast_vip';
 
   const upstream = useUpstreamMaterials(id);
+  const localRefImages = useMemo(() => dedupe(Array.isArray(d.localRefImages) ? d.localRefImages : []), [d.localRefImages]);
   const localRefVideos = useMemo(() => dedupe(Array.isArray(d.localRefVideos) ? d.localRefVideos : []), [d.localRefVideos]);
   const localRefAudios = useMemo(() => dedupe(Array.isArray(d.localRefAudios) ? d.localRefAudios : []), [d.localRefAudios]);
   const localMaterials = useMemo<Material[]>(
     () => [
+      ...localRefImages.map((url, index) => ({
+        id: `${id}:timeline-local-image:${index}:${url}`,
+        kind: 'image' as const,
+        url,
+        sourceNodeId: id,
+        origin: 'local' as const,
+        label: `素材图${index + 1}`,
+      })),
       ...blocks.filter((block) => block.imageUrl).map((block, index) => ({
         id: `${id}:timeline-frame-image:${block.id}:${block.imageUrl}`,
         kind: 'image' as const,
@@ -205,7 +227,7 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
         url,
         sourceNodeId: id,
         origin: 'local' as const,
-        label: `全局视频${index + 1}`,
+        label: `素材视频${index + 1}`,
       })),
       ...localRefAudios.map((url, index) => ({
         id: `${id}:timeline-local-audio:${index}:${url}`,
@@ -213,10 +235,10 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
         url,
         sourceNodeId: id,
         origin: 'local' as const,
-        label: `全局音频${index + 1}`,
+        label: `素材音频${index + 1}`,
       })),
     ],
-    [blocks, id, localRefVideos, localRefAudios],
+    [blocks, id, localRefImages, localRefVideos, localRefAudios],
   );
   const mentionMaterials = useMemo(
     () => [...upstream.texts, ...upstream.images, ...upstream.videos, ...upstream.audios, ...localMaterials],
@@ -241,6 +263,29 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
       setActiveId(blocks[0].id);
     }
   }, [activeId, blocks]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setCodexSkillLoading(true);
+    void getCodexCliSkills({
+      nodeId: id,
+      sessionId: String(d.codexSessionId || id),
+      workspaceDir: String(d.codexWorkspaceDir || '').trim(),
+    })
+      .then((result) => {
+        if (cancelled) return;
+        setCodexSkills(Array.isArray(result.skills) ? result.skills : []);
+        if (result.workspaceDir && result.workspaceDir !== d.codexWorkspaceDir) update({ codexWorkspaceDir: result.workspaceDir });
+      })
+      .catch((skillError: any) => {
+        if (!cancelled) logBus.warn(skillError?.message || 'Codex 技能读取失败', src);
+      })
+      .finally(() => {
+        if (!cancelled) setCodexSkillLoading(false);
+      });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, d.codexSessionId, d.codexWorkspaceDir]);
 
   const setBlocks = (next: TimelineDirectorBlockInput[], preferredIndex = 0) => update({ blocks: normalizeTimelineDirectorTotalDuration(next, preferredIndex) });
   const patchBlock = (bid: string, patch: Partial<Block>) => {
@@ -280,6 +325,14 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
       event.stopPropagation();
     }
   };
+  const toggleCodexSkill = (name: string) => {
+    const clean = String(name || '').trim();
+    if (!clean) return;
+    const next = selectedCodexSkillNames.includes(clean)
+      ? selectedCodexSkillNames.filter((item: string) => item !== clean)
+      : [...selectedCodexSkillNames, clean];
+    update({ codexSelectedSkillNames: next });
+  };
   const setActiveImage = (url: string, name?: string) => {
     if (!activeBlock) return;
     const patch: Partial<Block> = { imageUrl: url };
@@ -288,9 +341,13 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
     }
     patchBlock(activeBlock.id, patch);
   };
-  const appendRefs = (kind: 'video' | 'audio', urls: string[]) => {
+  const appendRefs = (kind: ReferenceKind, urls: string[]) => {
     const clean = dedupe(urls);
     if (!clean.length) return;
+    if (kind === 'image') {
+      update({ localRefImages: dedupe([...localRefImages, ...clean]) });
+      return;
+    }
     if (kind === 'video') {
       update({ localRefVideos: dedupe([...localRefVideos, ...clean]) });
       return;
@@ -305,11 +362,6 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
       logBus.info(`时间轴导演上传${kind === 'image' ? '图片' : kind === 'video' ? '视频' : '音频'} ${files.length} 个`, src);
       const uploaded = await Promise.all(files.map((file) => uploadFile(file)));
       const urls = uploaded.map((item) => item.url).filter(Boolean);
-      if (kind === 'image') {
-        const first = uploaded[0];
-        if (first) setActiveImage(first.url, first.filename || files[0]?.name);
-        return;
-      }
       appendRefs(kind, urls);
     } catch (uploadError: any) {
       const message = uploadError?.message || '上传失败';
@@ -331,11 +383,7 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
   };
   const handlePickResourceItem = async (item: api.ResourceItem) => {
     if (!resourcePickerKind || !item.fileUrl) return;
-    if (resourcePickerKind === 'image') {
-      setActiveImage(item.fileUrl, item.title || item.originalName || item.id);
-    } else {
-      appendRefs(resourcePickerKind, [item.fileUrl]);
-    }
+    appendRefs(resourcePickerKind, [item.fileUrl]);
     void api.updateResourceItem(item.id, { touch: true });
     closeResourcePicker();
   };
@@ -498,22 +546,39 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
     return () => { cancelled = true; window.clearTimeout(timer); };
   }, [resourcePickerKind, resourceQuery]);
 
-  // === LLM 优化 ===
-  const callLlm = async (system: string, user: string): Promise<string> => {
-    const useExternal = llmProviderSelection.available && llmProviderSelection.providerSource !== 'zhenzhen' && llmProviderSelection.providerId;
-    const messages = [{ role: 'system' as const, content: system }, { role: 'user' as const, content: user }];
-    if (useExternal) {
-      const r = await generateExternalLlm({
-        providerId: llmProviderSelection.providerId,
-        providerModel: llmProviderModel,
-        model: llmProviderModel || DEFAULT_LLM_MODEL,
-        messages,
-        providerParams: d?.llmProviderParams || {},
-      });
-      return r.content || '';
-    }
-    const r = await generateLlm({ model: d.llmModel || DEFAULT_LLM_MODEL, messages });
-    return r.content || '';
+  // === Codex Agent 优化 ===
+  const callCodexAgent = async (system: string, user: string): Promise<string> => {
+    const result = await streamCodexCliAgent({
+      nodeId: id,
+      sessionId: String(d.codexSessionId || id),
+      mode: 'storyboard',
+      command: '/chat',
+      preset: '时间轴导演台',
+      prompt: [
+        system,
+        '本轮只做文字优化：读脚本、分析参考图、拆解镜头、输出可回填的时间分镜描述。不要生成图片、不要写代码、不要调用 image_generation。',
+        '图片会作为真实多模态输入传给 Codex。请结合图片内容理解 @图片名 的语义，不要把 @图片名 替换成 URL 或普通解释。',
+        codexAgentTaskPrompt ? `用户自定义任务：\n${codexAgentTaskPrompt}` : '',
+        user,
+      ].filter(Boolean).join('\n\n'),
+      referenceTexts: [compiledPrompt],
+      images: dedupe([...requestImages, ...timelineImageUrls]),
+      videos: requestVideos,
+      audios: requestAudios,
+      selectedSkillNames: selectedCodexSkillNames,
+      llmOnly: true,
+      workspaceDir: String(d.codexWorkspaceDir || '').trim(),
+      model: String(d.codexModel || TIMELINE_CODEX_DEFAULT_MODEL).trim(),
+      profile: String(d.codexProfile || '').trim(),
+      sandbox: String(d.codexSandbox || 'workspace-write'),
+      approvalPolicy: String(d.codexApprovalPolicy || 'never'),
+      reasoningEffort: String(d.codexReasoningEffort || '').trim(),
+      webSearch: d.codexWebSearch === true,
+      includePlanTool: d.codexIncludePlanTool === true,
+      executablePath: String(d.codexExecutablePath || '').trim(),
+      extraArgs: parseExtraArgs(d.codexExtraArgs),
+    });
+    return String(result.text || result.reply || '').trim();
   };
   const handleOptimize = async () => {
     const transBlocks = blocks.slice(0, -1);
@@ -523,7 +588,7 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
     try {
       if (llmMode === 'full') {
         const prompt = buildTimelineDirectorLlmOptimizationPrompt(blocks, { mode: 'full', globalPrompt: resolvedGlobalPrompt });
-        const out = await callLlm(prompt.system, prompt.user);
+        const out = await callCodexAgent(prompt.system, prompt.user);
         const map = parseTimelineDirectorFullLlmOutput(out);
         setBlocks(blocks.map((b, i) => (i < transBlocks.length && map.has(i + 1) ? { ...b, prompt: map.get(i + 1) as string, mentions: [] } : b)));
       } else {
@@ -536,14 +601,14 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
             { mode: 'segment', globalPrompt: resolvedGlobalPrompt },
           );
           const segmentLine = prompt.user.split('\n').find((line) => line.startsWith(`第${i + 1}段`)) || prompt.user;
-          const out = await callLlm(prompt.system, segmentLine);
+          const out = await callCodexAgent(prompt.system, segmentLine);
           next[i] = { ...next[i], prompt: out.trim(), mentions: [] };
         }
         setBlocks(next);
       }
-      logBus.success('LLM 分镜优化完成', src);
+      logBus.success('Codex Agent 分镜优化完成', src);
     } catch (e: any) {
-      setError(e?.message || 'LLM 优化失败');
+      setError(e?.message || 'Codex Agent 优化失败');
     } finally { setOptimizing(false); }
   };
 
@@ -565,12 +630,12 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
     return collectMentionedMedia(allMentions, mentionMaterials);
   }, [blocks, globalPromptMentions, mentionMaterials]);
   const requestVideos = useMemo(
-    () => dedupe([...localRefVideos, ...mentionedMedia.videos]),
-    [localRefVideos, mentionedMedia.videos],
+    () => dedupe(mentionedMedia.videos),
+    [mentionedMedia.videos],
   );
   const requestAudios = useMemo(
-    () => dedupe([...localRefAudios, ...mentionedMedia.audios]),
-    [localRefAudios, mentionedMedia.audios],
+    () => dedupe(mentionedMedia.audios),
+    [mentionedMedia.audios],
   );
   const timelineImageUrls = useMemo(() => dedupe(blocks.map((block) => block.imageUrl)), [blocks]);
   const requestImages = useMemo(() => {
@@ -657,13 +722,29 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
   const completedVideoUrls = (Array.isArray(d.videoUrls) ? d.videoUrls : []).filter(Boolean);
   const currentOutputCount = videoUrl || completedVideoUrls.length ? 1 : 0;
   const latestVideoUrl = videoUrl || completedVideoUrls[0] || '';
+  const nodeReferenceItems = useMemo(() => [
+    ...localRefImages.map((url) => ({ kind: 'image' as const, url })),
+    ...localRefVideos.map((url) => ({ kind: 'video' as const, url })),
+    ...localRefAudios.map((url) => ({ kind: 'audio' as const, url })),
+  ], [localRefImages, localRefVideos, localRefAudios]);
+  const removeRef = (kind: ReferenceKind, url: string) => {
+    if (kind === 'image') {
+      update({ localRefImages: localRefImages.filter((item) => item !== url) });
+      return;
+    }
+    if (kind === 'video') {
+      update({ localRefVideos: localRefVideos.filter((item) => item !== url) });
+      return;
+    }
+    update({ localRefAudios: localRefAudios.filter((item) => item !== url) });
+  };
   const refreshOutputs = () => {
     const urls = completedVideoUrls.length ? completedVideoUrls : (videoUrl ? [videoUrl] : []);
     if (urls.length) update({ videoUrl: urls[0], videoUrls: urls });
   };
-  const cardCls = `rounded-md border p-3 ${isPixel ? 'px-card' : ''}`;
-  const btnCls = 'nodrag flex h-9 items-center justify-center gap-1 rounded border px-2 py-1 text-[11px] leading-none';
-  const controlCls = 'nodrag h-9 rounded border px-2 py-1 text-[11px] leading-normal outline-none';
+  const cardCls = `rounded-xl border p-2.5 ${isPixel ? 'px-card' : ''}`;
+  const btnCls = 'nodrag flex h-8 items-center justify-center gap-1 rounded-lg border px-2 py-1 text-[11px] leading-none';
+  const controlCls = 'nodrag h-8 rounded-lg border px-2 py-1 text-[11px] leading-normal outline-none';
   const resourceKindLabel = resourcePickerKind === 'image' ? '图像' : resourcePickerKind === 'video' ? '视频' : '音频';
   const renderResourcePreview = (item: api.ResourceItem) => {
     if (resourcePickerKind === 'video') {
@@ -678,6 +759,85 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
       );
     }
     return <SmartImage src={item.thumbUrl || item.fileUrl} alt={item.title} thumbSize={160} className="h-full w-full object-cover" />;
+  };
+  const renderReferencePool = () => {
+    if (nodeReferenceItems.length === 0) {
+      return <div className="text-[10px]" style={mutedStyle}>暂无节点素材</div>;
+    }
+    return (
+      <div className="flex flex-wrap gap-1.5" data-timeline-reference-pool>
+        {nodeReferenceItems.map((ref, index) => (
+          <div
+            key={`${ref.kind}:${ref.url}`}
+            className="relative nodrag nopan"
+            title={ref.kind === 'image' ? '点击设为当前镜头图片；输入 @ 可引用' : '输入 @ 可引用'}
+          >
+            {ref.kind === 'image' ? (
+              <div className="relative">
+                <button
+                  type="button"
+                  className="block overflow-hidden rounded border bg-black/35"
+                  style={{ borderColor: activeBlock?.imageUrl === ref.url ? 'var(--t8-accent, #d946ef)' : 'var(--t8-border-strong, rgba(255,255,255,.18))' }}
+                  onClick={() => setActiveImage(ref.url, fileName(ref.url))}
+                  onDoubleClick={(event) => {
+                    event.stopPropagation();
+                    setPreviewImageUrl(ref.url);
+                  }}
+                  title="点击设为当前镜头图片；双击预览大图"
+                >
+                  <SmartImage src={ref.url} alt="" thumbSize={180} className="h-12 w-14 object-cover" />
+                </button>
+                <button
+                  type="button"
+                  className="absolute bottom-0.5 right-0.5 flex h-5 w-5 items-center justify-center rounded border bg-black/65 text-white"
+                  style={{ borderColor: 'rgba(255,255,255,.22)' }}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setPreviewImageUrl(ref.url);
+                  }}
+                  title="预览大图"
+                  aria-label="预览大图"
+                >
+                  <ArrowRight size={11} />
+                </button>
+              </div>
+            ) : ref.kind === 'video' ? (
+              <LoopingVideo
+                src={ref.url}
+                className="h-12 w-14 rounded object-cover border bg-black"
+                style={{ borderColor: 'var(--t8-border-strong, rgba(255,255,255,.18))' }}
+                muted
+              />
+            ) : (
+              <div
+                className="h-12 w-14 rounded border flex flex-col items-center justify-center text-[9px]"
+                style={{ borderColor: 'var(--t8-border-strong, rgba(255,255,255,.18))', background: 'var(--t8-bg-panel, rgba(15,23,42,.72))' }}
+              >
+                <Music size={14} />
+                <span className="max-w-full truncate px-1">{fileName(ref.url)}</span>
+              </div>
+            )}
+            <span
+              className="pointer-events-none absolute left-0.5 top-0.5 rounded px-1 text-[8px] font-semibold"
+              style={{ background: 'rgba(0,0,0,.55)', color: '#fff' }}
+            >
+              {ref.kind === 'image' ? `图${index + 1}` : ref.kind === 'video' ? '视' : '音'}
+            </span>
+            <button
+              type="button"
+              className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full bg-rose-500 text-white"
+              onClick={(event) => {
+                event.stopPropagation();
+                removeRef(ref.kind, ref.url);
+              }}
+              title="移除素材"
+            >
+              <X size={9} />
+            </button>
+          </div>
+        ))}
+      </div>
+    );
   };
   const resourcePicker = resourcePickerKind ? (
     <div
@@ -740,16 +900,218 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
       </div>
     </div>
   ) : null;
+  const codexStudio = codexStudioOpen && typeof document !== 'undefined' ? createPortal(
+    <div className="fixed inset-0 z-[9999] nodrag nopan bg-black/55" onMouseDown={(event) => event.stopPropagation()}>
+      <div
+        className="absolute inset-4 flex flex-col overflow-hidden rounded-2xl border shadow-2xl"
+        style={{
+          background: 'var(--t8-bg-node, rgba(10,15,24,.98))',
+          color: 'var(--t8-text-main, #f8fafc)',
+          borderColor: 'var(--t8-accent, #d946ef)',
+        }}
+      >
+        <div className="flex items-center justify-between border-b px-5 py-4" style={{ borderColor: border, background: 'var(--t8-bg-panel, rgba(15,23,42,.72))' }}>
+          <div className="flex items-center gap-3">
+            <div className="flex h-11 w-11 items-center justify-center rounded-xl" style={{ background: 'var(--t8-accent, #d946ef)', color: '#fff' }}>
+              <PanelRightOpen size={23} />
+            </div>
+            <div>
+              <div className="text-lg font-black">Codex 创作台</div>
+              <div className="text-xs" style={mutedStyle}>时间轴导演台 · 读脚本 · 拆镜头 · 分析参考图 · Skill 调用</div>
+            </div>
+          </div>
+          <button type="button" className="nodrag rounded-lg border p-2" style={{ borderColor: border }} onClick={() => setCodexStudioOpen(false)} title="关闭创作台">
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="grid min-h-0 flex-1 grid-cols-[320px_minmax(420px,1fr)] gap-0 overflow-hidden">
+          <aside className="min-h-0 overflow-y-auto border-r p-4" style={{ borderColor: border }}>
+            <section className="mb-4 rounded-xl border p-3" style={cardStyle}>
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <div>
+                  <div className="text-sm font-black">Agent 设置</div>
+                  <div className="text-[11px]" style={mutedStyle}>这些字段会进入真实 Codex CLI 请求</div>
+                </div>
+                <button
+                  type="button"
+                  className="nodrag inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-bold"
+                  style={{ borderColor: border }}
+                  onClick={() => {
+                    setCodexSkillLoading(true);
+                    void getCodexCliSkills({
+                      nodeId: id,
+                      sessionId: String(d.codexSessionId || id),
+                      workspaceDir: String(d.codexWorkspaceDir || '').trim(),
+                    }).then((result) => {
+                      setCodexSkills(Array.isArray(result.skills) ? result.skills : []);
+                      if (result.workspaceDir) update({ codexWorkspaceDir: result.workspaceDir });
+                    }).finally(() => setCodexSkillLoading(false));
+                  }}
+                >
+                  <RefreshCw size={12} /> 刷新
+                </button>
+              </div>
+              <label className="mb-2 grid gap-1 text-[11px]" style={mutedStyle}>
+                模型
+                <select className={`${controlCls} w-full`} style={inputStyle} value={String(d.codexModel || TIMELINE_CODEX_DEFAULT_MODEL)} onChange={(e) => update({ codexModel: e.target.value })}>
+                  {CODEX_MODEL_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+                </select>
+              </label>
+              <label className="mb-2 grid gap-1 text-[11px]" style={mutedStyle}>
+                推理强度
+                <select className={`${controlCls} w-full`} style={inputStyle} value={String(d.codexReasoningEffort || '')} onChange={(e) => update({ codexReasoningEffort: e.target.value })}>
+                  <option value="">默认</option>
+                  <option value="low">low</option>
+                  <option value="medium">medium</option>
+                  <option value="high">high</option>
+                </select>
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                <label className="grid gap-1 text-[11px]" style={mutedStyle}>
+                  沙箱
+                  <select className={`${controlCls} w-full`} style={inputStyle} value={String(d.codexSandbox || 'workspace-write')} onChange={(e) => update({ codexSandbox: e.target.value })}>
+                    <option value="workspace-write">workspace-write</option>
+                    <option value="read-only">read-only</option>
+                    <option value="danger-full-access">danger-full-access</option>
+                  </select>
+                </label>
+                <label className="grid gap-1 text-[11px]" style={mutedStyle}>
+                  审批
+                  <select className={`${controlCls} w-full`} style={inputStyle} value={String(d.codexApprovalPolicy || 'never')} onChange={(e) => update({ codexApprovalPolicy: e.target.value })}>
+                    <option value="never">never</option>
+                    <option value="on-request">on-request</option>
+                    <option value="on-failure">on-failure</option>
+                    <option value="untrusted">untrusted</option>
+                  </select>
+                </label>
+              </div>
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                <label className="nodrag flex items-center gap-2 text-xs" style={mutedStyle}>
+                  <input type="checkbox" checked={d.codexWebSearch === true} onChange={(e) => update({ codexWebSearch: e.target.checked })} />
+                  Web Search
+                </label>
+                <label className="nodrag flex items-center gap-2 text-xs" style={mutedStyle}>
+                  <input type="checkbox" checked={d.codexIncludePlanTool === true} onChange={(e) => update({ codexIncludePlanTool: e.target.checked })} />
+                  Plan Tool
+                </label>
+              </div>
+            </section>
+
+            <section className="mb-4 rounded-xl border p-3" style={cardStyle}>
+              <div className="mb-2 text-sm font-black">挂载技能</div>
+              <div className="mb-2 text-[11px]" style={mutedStyle}>已选 {selectedCodexSkillNames.length} 个；自定义 Skill 由 Codex CLI Agent 工作区读取。</div>
+              <div className="max-h-56 space-y-1 overflow-y-auto pr-1">
+                {codexSkillLoading ? (
+                  <div className="flex h-20 items-center justify-center gap-1 text-[11px]" style={mutedStyle}><Loader2 size={13} className="animate-spin" /> 读取技能...</div>
+                ) : codexSkills.length === 0 ? (
+                  <div className="rounded border px-2 py-2 text-[11px]" style={{ borderColor: subBorder, ...mutedStyle }}>暂无可挂载 Skill</div>
+                ) : codexSkills.map((skill) => {
+                  const checked = selectedCodexSkillNames.includes(skill.name);
+                  return (
+                    <button
+                      key={`${skill.scope}:${skill.name}`}
+                      type="button"
+                      className="nodrag flex w-full items-center justify-between gap-2 rounded border px-2 py-1.5 text-left text-[11px]"
+                      style={{ borderColor: checked ? 'var(--t8-accent, #d946ef)' : subBorder, background: checked ? 'color-mix(in srgb, var(--t8-accent, #d946ef) 14%, transparent)' : 'transparent' }}
+                      onClick={() => toggleCodexSkill(skill.name)}
+                      title={skill.description || skill.name}
+                    >
+                      <span className="min-w-0 truncate font-semibold">{checked ? '✓ ' : ''}{skill.name}</span>
+                      <span className="shrink-0 opacity-60">{skill.scope === 'project' ? '项目' : '全局'}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+
+            <section className="rounded-xl border p-3" style={cardStyle}>
+              <div className="mb-2 text-sm font-black">CLI 路径</div>
+              <label className="mb-2 grid gap-1 text-[11px]" style={mutedStyle}>
+                Codex 可执行文件
+                <input className={`${controlCls} w-full`} style={inputStyle} value={String(d.codexExecutablePath || '')} placeholder="codex" onChange={(e) => update({ codexExecutablePath: e.target.value })} />
+              </label>
+              <label className="mb-2 grid gap-1 text-[11px]" style={mutedStyle}>
+                Codex 工作区
+                <input className={`${controlCls} w-full`} style={inputStyle} value={String(d.codexWorkspaceDir || '')} placeholder="留空自动创建" onChange={(e) => update({ codexWorkspaceDir: e.target.value })} />
+              </label>
+              <label className="grid gap-1 text-[11px]" style={mutedStyle}>
+                额外 CLI 参数
+                <input className={`${controlCls} w-full`} style={inputStyle} value={String(d.codexExtraArgs || '')} placeholder="--skip-git-repo-check" onChange={(e) => update({ codexExtraArgs: e.target.value })} />
+              </label>
+            </section>
+          </aside>
+
+          <main className="min-h-0 overflow-y-auto p-4">
+            <section className="mb-4 rounded-xl border p-3" style={cardStyle}>
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <div>
+                  <div className="text-sm font-black">自定义任务脚本</div>
+                  <div className="text-[11px]" style={mutedStyle}>例如：读脚本，拆 8 个镜头，分析参考图，给每段生图提示词建议</div>
+                </div>
+                <button type="button" className="nodrag inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-bold" style={{ borderColor: border }} onClick={handleOptimize} disabled={optimizing}>
+                  {optimizing ? <Loader2 size={12} className="animate-spin" /> : <Wand2 size={12} />} 执行优化
+                </button>
+              </div>
+              <textarea
+                className="nodrag min-h-[180px] w-full resize-y rounded-lg border px-3 py-2 text-sm outline-none"
+                style={inputStyle}
+                value={codexAgentTaskPrompt}
+                placeholder="写给 Codex Agent 的高阶任务。可要求读脚本、拆镜头、分析参考图、输出每段生图提示词建议。"
+                onChange={(e) => update({ codexAgentTaskPrompt: e.target.value })}
+              />
+            </section>
+
+            <section className="mb-4 rounded-xl border p-3" style={cardStyle}>
+              <div className="mb-2 text-sm font-black">本轮输入</div>
+              <div className="grid grid-cols-4 gap-2 text-[11px]">
+                <div className="rounded border px-2 py-2" style={{ borderColor: subBorder }}>镜头：{blocks.length}</div>
+                <div className="rounded border px-2 py-2" style={{ borderColor: subBorder }}>图片：{dedupe([...requestImages, ...timelineImageUrls]).length}</div>
+                <div className="rounded border px-2 py-2" style={{ borderColor: subBorder }}>视频：{requestVideos.length}</div>
+                <div className="rounded border px-2 py-2" style={{ borderColor: subBorder }}>音频：{requestAudios.length}</div>
+              </div>
+              <div className="mt-3 max-h-64 overflow-y-auto rounded border p-2 text-[11px] whitespace-pre-wrap" style={{ borderColor: subBorder, ...mutedStyle }}>
+                {compiledPrompt || '(暂无 prompt)'}
+              </div>
+            </section>
+
+            <section className="rounded-xl border p-3" style={cardStyle}>
+              <div className="mb-2 flex items-center gap-2 text-sm font-black"><Settings2 size={15} /> 当前挂载</div>
+              <div className="flex flex-wrap gap-1.5">
+                {selectedCodexSkillNames.length === 0 ? (
+                  <span className="text-[11px]" style={mutedStyle}>未挂载 Skill</span>
+                ) : selectedCodexSkillNames.map((name: string) => (
+                  <button
+                    key={name}
+                    type="button"
+                    className="nodrag rounded border px-2 py-1 text-[11px]"
+                    style={{ borderColor: border }}
+                    onClick={() => toggleCodexSkill(name)}
+                    title="点击取消挂载"
+                  >
+                    {name} ×
+                  </button>
+                ))}
+              </div>
+            </section>
+          </main>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  ) : null;
 
   return (
-    <div
-      className={`relative w-[460px] overflow-visible rounded-lg border-2 text-sm shadow-2xl transition-all ${selected ? 'shadow-fuchsia-500/20' : ''}`}
-      style={{
-        background: 'var(--t8-bg-node, rgba(10,15,24,.95))',
-        color: 'var(--t8-text-main, #f8fafc)',
-        borderColor: selected ? 'var(--t8-accent, #d946ef)' : border,
-      }}
-    >
+    <>
+      {codexStudio}
+      <div
+        className={`relative w-[480px] overflow-visible rounded-2xl border-2 text-sm shadow-2xl transition-all ${selected ? 'shadow-fuchsia-500/20' : ''}`}
+        style={{
+          background: 'var(--t8-bg-node, rgba(10,15,24,.95))',
+          color: 'var(--t8-text-main, #f8fafc)',
+          borderColor: selected ? 'var(--t8-accent, #d946ef)' : border,
+        }}
+      >
       <Handle
         type="target"
         position={Position.Left}
@@ -764,6 +1126,35 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
       />
 
       {resourcePicker}
+      {previewImageUrl && (
+        <div
+          className="nodrag nopan absolute inset-3 z-[60] flex flex-col rounded-lg border p-2 shadow-2xl"
+          style={{
+            background: 'var(--t8-bg-node, rgba(10,15,24,.98))',
+            borderColor: border,
+            color: 'var(--t8-text-main, #f8fafc)',
+          }}
+          onPointerDown={(event) => event.stopPropagation()}
+          onMouseDown={(event) => event.stopPropagation()}
+        >
+          <div className="mb-2 flex items-center gap-2">
+            <div className="min-w-0 flex-1 truncate text-[11px] font-semibold">{fileName(previewImageUrl)}</div>
+            <button
+              type="button"
+              className="flex h-7 w-7 items-center justify-center rounded border"
+              style={{ borderColor: border }}
+              onClick={() => setPreviewImageUrl('')}
+              title="关闭预览"
+              aria-label="关闭预览"
+            >
+              <X size={13} />
+            </button>
+          </div>
+          <div className="min-h-0 flex-1 overflow-hidden rounded bg-black/45">
+            <SmartImage src={previewImageUrl} alt="" className="h-full w-full object-contain" />
+          </div>
+        </div>
+      )}
 
       {/* 头部 */}
       <div className="flex items-center gap-2 border-b px-3 py-2" style={{ borderColor: subBorder }}>
@@ -791,19 +1182,19 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
         </span>
       </div>
 
-      <div className="space-y-2 p-3 nodrag">
-        <div className="space-y-2 rounded border border-white/10 bg-white/[0.03] p-2">
+      <div className="space-y-1.5 p-2.5 nodrag">
+        <div className="space-y-1.5 rounded-xl border border-white/10 bg-white/[0.03] p-1.5">
           <button
             type="button"
             onClick={() => update({ advancedProviderOpen: !d?.advancedProviderOpen })}
-            className="nodrag flex w-full items-center justify-between rounded px-1 py-1 text-[10px] font-semibold hover:bg-white/5"
+            className="nodrag flex h-8 w-full items-center justify-between rounded-lg px-2 py-1 text-[10px] font-semibold hover:bg-white/5"
             style={mutedStyle}
           >
             <span>高级来源</span>
             <span>{activeJimeng ? activeJimeng.label || activeJimeng.id : '未配置即梦 CLI'}</span>
           </button>
           {d?.advancedProviderOpen && (
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid grid-cols-2 gap-1.5">
               <select
                 className={`${controlCls} w-full`}
                 style={inputStyle}
@@ -826,7 +1217,7 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
           )}
         </div>
 
-        <div className="grid grid-cols-[minmax(0,2fr)_minmax(76px,0.8fr)_minmax(92px,0.9fr)_auto] items-center gap-1.5">
+        <div className="grid grid-cols-[minmax(0,2fr)_minmax(82px,0.75fr)_minmax(88px,0.75fr)_minmax(70px,auto)] items-center gap-1.5">
           <select
             className={`${controlCls} min-w-0`}
             style={inputStyle}
@@ -837,10 +1228,10 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
             {externalModelOptions.length === 0 && <option value="seedance2.0fast_vip">seedance2.0fast_vip</option>}
             {externalModelOptions.map((m) => <option key={m} value={m}>{m}</option>)}
           </select>
-          <select className={controlCls} style={inputStyle} value={ratio} onChange={(e) => update({ ratio: e.target.value })}>
+          <select className={`${controlCls} min-w-0`} style={inputStyle} value={ratio} onChange={(e) => update({ ratio: e.target.value })}>
             {RATIO_OPTIONS.map((value) => <option key={value} value={value}>{value}</option>)}
           </select>
-          <select className={controlCls} style={inputStyle} value={resolution} onChange={(e) => update({ resolution: e.target.value })}>
+          <select className={`${controlCls} min-w-0`} style={inputStyle} value={resolution} onChange={(e) => update({ resolution: e.target.value })}>
             {RESOLUTION_OPTIONS.map((value) => <option key={value} value={value}>{value}</option>)}
           </select>
           <label className={`${controlCls} flex min-w-[74px] items-center justify-center gap-1 px-1.5`} style={inputStyle} title="生成音频">
@@ -851,13 +1242,13 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
 
         {/* 时间线(镜头块,永远可见) */}
         <div className={cardCls} style={cardStyle}>
-          <div className="mb-2 flex items-center justify-between text-[11px]">
+          <div className="mb-1.5 flex items-center justify-between text-[11px]">
             <span className="font-semibold">秒级时间线</span>
             <button type="button" className={btnCls} style={{ borderColor: border }} disabled={!canAddBlock} onClick={addBlock}>
               <Plus size={11} /> 加镜头
             </button>
           </div>
-          <div className="mb-2">
+          <div className="mb-1.5">
             <MentionPromptInput
               title="全局提示词"
               value={globalPrompt}
@@ -868,11 +1259,11 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
               isDark={isDark}
               isPixel={isPixel}
               promptTemplateKind="video"
-              className="nodrag min-h-[64px] w-full resize-none rounded border px-2 py-1 text-xs outline-none"
+              className="nodrag min-h-[56px] w-full resize-none rounded-lg border px-2 py-1 text-xs outline-none"
               style={inputStyle}
             />
           </div>
-          <div ref={timelineRef} className="flex h-14 min-w-0 items-stretch overflow-hidden rounded border nodrag nopan" style={{ borderColor: border }}>
+          <div ref={timelineRef} className="flex h-12 min-w-0 items-stretch overflow-hidden rounded-lg border nodrag nopan" style={{ borderColor: border }}>
             {blocks.map((b, i) => {
               const isLast = i === blocks.length - 1;
               const active = b.id === activeId;
@@ -942,15 +1333,15 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
               );
             })}
           </div>
-          <div className="mt-2 text-[10px]" style={mutedStyle}>点镜头块/拖块缘或↔ 调时长；末镜头只定格、不计时长。总时长 = 前面各镜头时长之和。</div>
+          <div className="mt-1.5 text-[10px]" style={mutedStyle}>点镜头块/拖块缘或↔ 调时长；末镜头只定格、不计时长。总时长 = 前面各镜头时长之和。</div>
         </div>
 
-        {/* LLM 优化条 */}
-        <div className="flex items-center justify-between">
-          <span className="text-[11px] font-semibold">分镜编辑</span>
-          <div className="flex items-center gap-1">
+        {/* Codex Agent 优化条 */}
+        <div className="grid min-w-0 gap-1.5">
+          <div className="grid min-w-0 grid-cols-[auto_auto_minmax(0,0.9fr)_minmax(0,1fr)] items-center gap-1.5">
+            <span className="shrink-0 text-[11px] font-semibold">分镜编辑</span>
             {activeBlock && !isLastActive && (
-              <label className="flex h-9 shrink-0 items-center gap-1 text-[11px]" style={mutedStyle}>
+              <label className="flex h-8 shrink-0 items-center gap-1 text-[11px]" style={mutedStyle}>
                 时长
                 <input
                   type="number"
@@ -967,34 +1358,31 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
                 s
               </label>
             )}
-            <select
-              className={`${controlCls} max-w-[118px] text-[10px]`}
-              style={inputStyle}
-              value={llmProviderSelection.providerId || ''}
-              onChange={(e) => {
-                const provider = llmProviders.find((item) => item.id === e.target.value);
-                update({
-                  llmProviderSource: provider?.protocol || 'zhenzhen',
-                  llmProviderId: provider?.id || '',
-                  llmProviderModel: provider ? advancedProviderModelOptions(provider, 'llm')[0] || '' : '',
-                });
-              }}
-              title="LLM 优化平台"
-            >
-              <option value="">内置LLM</option>
-              {llmProviders.map((provider) => <option key={provider.id} value={provider.id}>{provider.label || provider.id}</option>)}
-            </select>
-            {llmProviderSelection.provider && (
-              <select className={`${controlCls} max-w-[110px] text-[10px]`} style={inputStyle} value={llmProviderModel} onChange={(e) => update({ llmProviderModel: e.target.value })} title="LLM 模型">
-                {llmModelOptions.map((modelOption) => <option key={modelOption} value={modelOption}>{modelOption}</option>)}
-              </select>
-            )}
-            <select className={`${controlCls} text-[10px]`} style={inputStyle} value={llmMode} onChange={(e) => update({ llmMode: e.target.value })}>
+            <select className={`${controlCls} min-w-0 flex-1 text-[10px]`} style={inputStyle} value={llmMode} onChange={(e) => update({ llmMode: e.target.value })}>
               <option value="segment">分段优化</option>
               <option value="full">全文优化</option>
             </select>
-            <button type="button" className={btnCls} style={{ borderColor: border }} disabled={optimizing} onClick={handleOptimize}>
-              {optimizing ? <Loader2 size={11} className="animate-spin" /> : <Wand2 size={11} />} LLM优化
+            <select
+              className={`${controlCls} min-w-0 flex-1 text-[10px]`}
+              style={inputStyle}
+              value=""
+              onChange={(e) => toggleCodexSkill(e.target.value)}
+              title="挂载技能"
+            >
+              <option value="">{codexSkillLoading ? '读取技能...' : selectedCodexSkillNames.length ? `已挂 ${selectedCodexSkillNames.length}` : '挂载技能'}</option>
+              {codexSkills.map((skill) => (
+                <option key={`${skill.scope}:${skill.name}`} value={skill.name}>
+                  {selectedCodexSkillNames.includes(skill.name) ? '✓ ' : ''}{skill.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-1.5">
+            <button type="button" className={btnCls} style={{ borderColor: border }} disabled={optimizing} onClick={handleOptimize} title="Codex Agent 优化">
+              {optimizing ? <Loader2 size={11} className="animate-spin" /> : <Wand2 size={11} />} 优化
+            </button>
+            <button type="button" className={btnCls} style={{ borderColor: border }} onClick={() => setCodexStudioOpen(true)} title="打开 Codex 创作台">
+              <PanelRightOpen size={12} /> 创作台
             </button>
           </div>
         </div>
@@ -1003,10 +1391,10 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
         {activeBlock ? (
           <div className={cardCls} style={cardStyle} onKeyDownCapture={stopDeleteFromCanvas}>
             {/* 缩略图 */}
-            <div className="relative mb-2 flex h-28 w-full items-center justify-center overflow-hidden rounded border" style={{ borderColor: subBorder, background: 'rgba(0,0,0,.2)' }}>
+            <div className="relative mb-1.5 flex h-24 min-w-0 w-full items-center justify-center overflow-hidden rounded-xl border" style={{ borderColor: subBorder, background: 'rgba(0,0,0,.2)' }}>
               <input
                 aria-label="图名"
-                className="nodrag absolute left-2 top-2 z-10 h-6 max-w-[180px] rounded border border-white/15 bg-black/55 px-1.5 text-[10px] font-semibold text-white outline-none"
+                className="nodrag absolute left-2 top-2 z-10 h-6 max-w-[220px] rounded-lg border border-white/15 bg-black/55 px-1.5 text-[10px] font-semibold text-white outline-none"
                 value={activeBlock.imageName}
                 placeholder="图名"
                 onChange={(e) => patchBlock(activeBlock.id, { imageName: sanitizeTimelineImageName(e.target.value, activeBlock.imageUrl, activeIndex) })}
@@ -1015,24 +1403,28 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
             </div>
 
             {/* 换图来源 */}
-            <div className="grid grid-cols-3 gap-1.5">
-              <button type="button" className={btnCls} style={{ borderColor: border }} onClick={() => uploadImageRef.current?.click()}><ImageIcon size={13} /> 上传图</button>
-              <button type="button" className={btnCls} style={{ borderColor: border }} onClick={() => uploadVideoRef.current?.click()}><VideoIcon size={13} /> 上传视频</button>
-              <button type="button" className={btnCls} style={{ borderColor: border }} onClick={() => uploadAudioRef.current?.click()}><Music size={13} /> 上传音频</button>
+            <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)] gap-1.5">
+              <button type="button" className={`${btnCls} min-w-0`} style={{ borderColor: border }} onClick={() => uploadImageRef.current?.click()}><ImageIcon size={13} /> <span className="truncate">上传图</span></button>
+              <button type="button" className={`${btnCls} min-w-0`} style={{ borderColor: border }} onClick={() => uploadVideoRef.current?.click()}><VideoIcon size={13} /> <span className="truncate">上传视频</span></button>
+              <button type="button" className={`${btnCls} min-w-0`} style={{ borderColor: border }} onClick={() => uploadAudioRef.current?.click()}><Music size={13} /> <span className="truncate">上传音频</span></button>
             </div>
-            <div className="mt-1.5 grid grid-cols-3 gap-1.5">
-              <button type="button" className={btnCls} style={{ borderColor: border }} onClick={() => openResourcePicker('image')}><Library size={13} /> 资源图</button>
-              <button type="button" className={btnCls} style={{ borderColor: border }} onClick={() => openResourcePicker('video')}><Library size={13} /> 资源视频</button>
-              <button type="button" className={btnCls} style={{ borderColor: border }} onClick={() => openResourcePicker('audio')}><Library size={13} /> 资源音频</button>
+            <div className="mt-1.5 grid min-w-0 grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)] gap-1.5">
+              <button type="button" className={`${btnCls} min-w-0`} style={{ borderColor: border }} onClick={() => openResourcePicker('image')}><Library size={13} /> <span className="truncate">资源图</span></button>
+              <button type="button" className={`${btnCls} min-w-0`} style={{ borderColor: border }} onClick={() => openResourcePicker('video')}><Library size={13} /> <span className="truncate">资源视频</span></button>
+              <button type="button" className={`${btnCls} min-w-0`} style={{ borderColor: border }} onClick={() => openResourcePicker('audio')}><Library size={13} /> <span className="truncate">资源音频</span></button>
             </div>
 
             <input ref={uploadImageRef} type="file" accept="image/*" multiple className="hidden" onChange={(event) => handleUpload('image', event)} />
             <input ref={uploadVideoRef} type="file" accept="video/*" multiple className="hidden" onChange={(event) => handleUpload('video', event)} />
             <input ref={uploadAudioRef} type="file" accept="audio/*" multiple className="hidden" onChange={(event) => handleUpload('audio', event)} />
 
+            <div className="mt-2">
+              {renderReferencePool()}
+            </div>
+
             {/* 描述(末镜头无) */}
             {!isLastActive && (
-              <div>
+              <div className="mt-1.5">
                 <div className="mb-1 text-[10px]" style={mutedStyle}>描述词</div>
                 <MentionPromptInput
                   value={activeBlock.prompt}
@@ -1050,11 +1442,11 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
             )}
 
             {/* 镜头操作 */}
-            <div className="grid grid-cols-4 gap-1.5 mt-2">
-              <button type="button" disabled={activeIndex === 0} className={btnCls} style={{ borderColor: border }} onClick={() => moveBlock(activeBlock.id, -1)}><ArrowLeft size={12} /> 左移</button>
-              <button type="button" disabled={activeIndex === blocks.length - 1} className={btnCls} style={{ borderColor: border }} onClick={() => moveBlock(activeBlock.id, 1)}>右移 <ArrowRight size={12} /></button>
-              <button type="button" disabled={!canAddBlock} className={btnCls} style={{ borderColor: border }} onClick={() => duplicateBlock(activeBlock.id)}><Copy size={12} /> 复制</button>
-              <button type="button" disabled={blocks.length <= 2} className={btnCls} style={{ borderColor: border }} onClick={() => removeBlock(activeBlock.id)}><Trash2 size={12} className="text-rose-400" /> 删除</button>
+            <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)] gap-1.5 mt-1.5">
+              <button type="button" disabled={activeIndex === 0} className={`${btnCls} min-w-0`} style={{ borderColor: border }} onClick={() => moveBlock(activeBlock.id, -1)}><ArrowLeft size={12} /> <span className="truncate">左移</span></button>
+              <button type="button" disabled={activeIndex === blocks.length - 1} className={`${btnCls} min-w-0`} style={{ borderColor: border }} onClick={() => moveBlock(activeBlock.id, 1)}><span className="truncate">右移</span> <ArrowRight size={12} /></button>
+              <button type="button" disabled={!canAddBlock} className={`${btnCls} min-w-0`} style={{ borderColor: border }} onClick={() => duplicateBlock(activeBlock.id)}><Copy size={12} /> <span className="truncate">复制</span></button>
+              <button type="button" disabled={blocks.length <= 2} className={`${btnCls} min-w-0`} style={{ borderColor: border }} onClick={() => removeBlock(activeBlock.id)}><Trash2 size={12} className="text-rose-400" /> <span className="truncate">删除</span></button>
             </div>
           </div>
         ) : (
@@ -1069,7 +1461,7 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
             </div>
             {(compiled.videos.length > 0 || compiled.audios.length > 0) && (
               <div className="rounded border px-2 py-1" style={{ borderColor: subBorder }}>
-                全局参考：{compiled.videos.length} 视频 / {compiled.audios.length} 音频
+                引用素材：{compiled.videos.length} 视频 / {compiled.audios.length} 音频
               </div>
             )}
             <div className="font-semibold">Prompt</div>
@@ -1084,12 +1476,12 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
 
         {latestVideoUrl && <div className="rounded-lg overflow-hidden border" style={{ borderColor: border }}><LoopingVideo src={latestVideoUrl} className="w-full" /></div>}
 
-        <div className="grid grid-cols-2 gap-2">
+        <div className="grid grid-cols-2 gap-1.5">
           <button
             type="button"
             onClick={running ? undefined : handleGenerate}
             disabled={!totalValid || running}
-            className="nodrag flex h-10 items-center justify-center gap-1.5 rounded-md border px-3 py-2 text-xs font-semibold disabled:opacity-50"
+            className="nodrag flex h-9 items-center justify-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-semibold disabled:opacity-50"
             style={{
               borderColor: 'var(--t8-accent, #d946ef)',
               background: totalValid
@@ -1100,7 +1492,7 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
           >
             {running ? <><Loader2 size={14} className="animate-spin" /> 生成中 {mmss}</> : <><Sparkles size={14} /> 生成全部</>}
           </button>
-          <div className="flex h-10 items-center gap-2 rounded-md border px-2 py-2 text-[11px]" style={{ borderColor: subBorder }}>
+          <div className="flex h-9 items-center gap-2 rounded-xl border px-2 py-2 text-[11px]" style={{ borderColor: subBorder }}>
             {running ? <Loader2 size={13} className="animate-spin" /> : <Wand2 size={13} />}
             <span className="truncate" style={mutedStyle}>
               已输出 {currentOutputCount} / 1
@@ -1118,7 +1510,8 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
           </div>
         </div>
       </div>
-    </div>
+      </div>
+    </>
   );
 };
 
