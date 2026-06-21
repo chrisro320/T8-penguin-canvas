@@ -62,7 +62,7 @@ export const NODE_PORTS: Record<string, NodePorts> = {
   seedance: { inputs: ['text', 'image', 'video', 'audio'], outputs: ['video'] },
   // 导演分镜台: 内部把多个分镜并发调度到 Seedance2.0, 每个完成的视频即时输出, 同时输出分镜文本摘要。
   'director-storyboard': { inputs: ['text', 'image', 'video', 'audio'], outputs: ['video', 'text'] },
-  'timeline-director': { inputs: ['text', 'image', 'video', 'audio'], outputs: ['video'] },
+  'timeline-director': { inputs: ['text', 'image', 'video', 'audio'], outputs: ['text', 'image', 'video', 'audio', 'model3d'] },
   audio: { inputs: ['text', 'audio'], outputs: ['audio'] },
   llm: { inputs: ['text', 'image', 'video'], outputs: ['text'] },
 

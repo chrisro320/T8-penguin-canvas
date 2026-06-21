@@ -52,6 +52,27 @@ export interface TimelineDirectorCompiledSegment {
   prompt: string;
 }
 
+export interface TimelineDirectorAgentShotPlanInput {
+  title?: string;
+  imageName?: string;
+  prompt?: string;
+  imagePrompt?: string;
+  durationSec?: number;
+}
+
+export interface TimelineDirectorAgentShotPlan {
+  title: string;
+  imageName: string;
+  prompt: string;
+  imagePrompt: string;
+  durationSec: number;
+}
+
+export interface TimelineDirectorAgentPlan {
+  globalPrompt: string;
+  shots: TimelineDirectorAgentShotPlan[];
+}
+
 export const TIMELINE_DIRECTOR_MIN_SEGMENT_DURATION_SEC = 1;
 export const TIMELINE_DIRECTOR_MAX_SEGMENT_DURATION_SEC = 12;
 export const TIMELINE_DIRECTOR_MIN_TOTAL_DURATION_SEC = 4;
@@ -77,6 +98,10 @@ function cleanStringArray(value: unknown): string[] {
   return out;
 }
 
+function unknownRecord(value: unknown): Record<string, any> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, any> : {};
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
@@ -93,7 +118,7 @@ export function sanitizeTimelineSegmentDuration(value: unknown): number {
 
 export function timelineDirectorTotalDuration(input: TimelineDirectorBlockInput[]): number {
   const blocks = sanitizeTimelineDirectorBlocks(input);
-  return round1(blocks.slice(0, -1).reduce((sum, block) => sum + block.durationSec, 0));
+  return round1(blocks.reduce((sum, block) => sum + block.durationSec, 0));
 }
 
 function setSegmentDuration(
@@ -112,7 +137,7 @@ export function normalizeTimelineDirectorTotalDuration(
   preferredIndex = 0,
 ): TimelineDirectorBlock[] {
   const blocks = sanitizeTimelineDirectorBlocks(input);
-  const segmentCount = Math.max(0, blocks.length - 1);
+  const segmentCount = blocks.length;
   if (segmentCount === 0) return blocks;
 
   const preferred = Math.max(0, Math.min(segmentCount - 1, Math.round(preferredIndex)));
@@ -154,7 +179,7 @@ export function clampTimelineDirectorSegmentDuration(
   value: unknown,
 ): number {
   const blocks = sanitizeTimelineDirectorBlocks(input);
-  const segmentCount = blocks.length - 1;
+  const segmentCount = blocks.length;
   if (index < 0 || index >= segmentCount) return sanitizeTimelineSegmentDuration(value);
   const next = blocks.map((block, blockIndex) => (
     blockIndex === index
@@ -220,20 +245,20 @@ export function buildTimelineDirectorSegments(
   const blocks = sanitizeTimelineDirectorBlocks(input);
   const segments: TimelineDirectorCompiledSegment[] = [];
 
-  for (let index = 0; index < blocks.length - 1; index += 1) {
-    const from = blocks[index];
-    const to = blocks[index + 1];
-    const description = from.prompt || '按两张镜头图自然生成连续视频内容';
-    const durationSec = sanitizeTimelineSegmentDuration(from.durationSec);
+  for (let index = 0; index < blocks.length; index += 1) {
+    const frame = blocks[index];
+    const next = blocks[index + 1] || null;
+    const description = frame.prompt || '按当前镜头图生成连续视频内容';
+    const durationSec = sanitizeTimelineSegmentDuration(frame.durationSec);
     const parts = [
-      `${from.mentionToken} -> ${to.mentionToken}`,
+      next ? `${frame.mentionToken} -> ${next.mentionToken}` : frame.mentionToken,
       `时长：${durationSec}秒`,
       description,
     ];
     segments.push({
       index,
-      fromToken: from.mentionToken,
-      toToken: to.mentionToken,
+      fromToken: frame.mentionToken,
+      toToken: next?.mentionToken || frame.mentionToken,
       durationSec,
       description,
       prompt: parts.join('\n'),
@@ -271,9 +296,10 @@ export function buildTimelineDirectorExternalVideoRequest(
   const fullPrompt = buildTimelineDirectorCompiledPrompt(blocks, {
     globalPrompt: options.globalPrompt,
   }) || '多镜头时间轴视频';
-  const transitionPrompts = segments.map(() => fullPrompt);
-  const transitionDurations = segments.map((segment) => segment.durationSec);
-  const duration = round1(transitionDurations.reduce((sum, value) => sum + value, 0));
+  const transitionCount = Math.max(0, timelineImages.length - 1);
+  const transitionPrompts = segments.slice(0, transitionCount).map(() => fullPrompt);
+  const transitionDurations = segments.slice(0, transitionCount).map((segment) => segment.durationSec);
+  const duration = timelineDirectorTotalDuration(blocks);
   const providerParams = {
     ...(options.providerParams || {}),
     frameMode: referenceImages.length ? 'omni' : 'multiframe',
@@ -345,4 +371,111 @@ export function parseTimelineDirectorFullLlmOutput(output: string): Map<number, 
     }
   });
   return map;
+}
+
+function stripJsonFence(value: string): string {
+  return String(value || '')
+    .trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+}
+
+export function extractTimelineDirectorAgentPlanJson(output: string): any {
+  const text = stripJsonFence(output);
+  if (!text) throw new Error('Codex Agent 没有返回拆镜 JSON');
+  try {
+    return JSON.parse(text);
+  } catch {
+    const start = text.indexOf('{');
+    const end = text.lastIndexOf('}');
+    if (start >= 0 && end > start) {
+      try {
+        return JSON.parse(text.slice(start, end + 1));
+      } catch {
+        // Fall through to clear error below.
+      }
+    }
+    throw new Error('Codex Agent 返回不是有效 JSON，无法安全写回时间轴');
+  }
+}
+
+export function normalizeTimelineDirectorAgentPlan(
+  value: unknown,
+  options: { fallbackGlobalPrompt?: string; maxShots?: number } = {},
+): TimelineDirectorAgentPlan {
+  const raw = unknownRecord(value);
+  const maxShots = clamp(Math.floor(Number(options.maxShots) || 9), 1, 9);
+  const rawShots = Array.isArray(raw.shots)
+    ? raw.shots
+    : Array.isArray(raw.frames)
+      ? raw.frames
+      : Array.isArray(raw.blocks)
+        ? raw.blocks
+        : [];
+  const shots = rawShots.slice(0, maxShots).map((item, index) => {
+    const record = unknownRecord(item);
+    const title = cleanText(record.title || record.name || record.shot || record.label, 80) || `镜头${index + 1}`;
+    const imageName = sanitizeTimelineImageName(record.imageName || record.image_name || title, undefined, index);
+    const prompt = cleanText(record.prompt || record.videoPrompt || record.video_prompt || record.description || record.desc, 4000);
+    const imagePrompt = cleanText(record.imagePrompt || record.image_prompt || record.keyframePrompt || record.keyframe_prompt || prompt, 4000);
+    return {
+      title,
+      imageName,
+      prompt,
+      imagePrompt,
+      durationSec: sanitizeTimelineSegmentDuration(record.durationSec ?? record.duration ?? record.seconds ?? record.sec),
+    };
+  }).filter((shot) => shot.prompt || shot.imagePrompt);
+
+  if (shots.length < 1) throw new Error('Codex Agent 至少需要返回 1 个镜头');
+
+  const normalized = normalizeTimelineDirectorTotalDuration(shots.map((shot, index) => ({
+    id: `agent-shot-${index + 1}`,
+    title: shot.title,
+    imageName: shot.imageName,
+    prompt: shot.prompt || shot.imagePrompt,
+    durationSec: shot.durationSec,
+  })), 0);
+
+  return {
+    globalPrompt: cleanText(raw.globalPrompt || raw.global_prompt || raw.global || options.fallbackGlobalPrompt, 8000),
+    shots: shots.map((shot, index) => ({
+      ...shot,
+      durationSec: normalized[index]?.durationSec ?? sanitizeTimelineSegmentDuration(shot.durationSec),
+    })),
+  };
+}
+
+export function buildTimelineDirectorAgentPlanPrompt(input: {
+  script?: string;
+  globalPrompt?: string;
+  compiledPrompt?: string;
+  blocks?: TimelineDirectorBlockInput[];
+  referenceImageCount?: number;
+  maxShots?: number;
+}): { system: string; user: string } {
+  const blocks = sanitizeTimelineDirectorBlocks(input.blocks || []);
+  const maxShots = clamp(Math.floor(Number(input.maxShots) || 9), 1, 9);
+  const system = [
+    '你是时间轴导演台的 Codex Agent 执行规划器。',
+    '任务：读取元脚本、全局提示词和参考图，拆成可直接生成关键帧图和单视频时间轴的镜头计划。',
+    '必须只返回 JSON，不要 Markdown，不要解释。',
+    'JSON 格式：{"globalPrompt":"全局提示词","shots":[{"title":"镜头1","imageName":"镜头1","durationSec":2,"prompt":"视频描述词","imagePrompt":"关键帧生图提示词"}]}',
+    `镜头数量 1-${maxShots}；单镜头时长 1-12 秒；总时长 4-15 秒。`,
+    '除非用户元脚本明确指定镜头数或单镜头时长，否则你自行决定镜头数和时长；默认优先拆成 4-6 个镜头，适配后续 2x2 或 2x3 宫格关键帧图。',
+    'imageName 必须短、稳定、可作为 @图片名；prompt 是视频段描述；imagePrompt 是生成该镜头关键帧图的完整提示词。',
+    '参考图已作为真实多模态图片输入给 Codex；如果用户用 @图片名定义角色/场景，必须继承其视觉身份。',
+  ].join('\n');
+  const user = [
+    cleanText(input.script, 12000) ? `元脚本：\n${cleanText(input.script, 12000)}` : '',
+    cleanText(input.globalPrompt, 8000) ? `全局提示词：\n${cleanText(input.globalPrompt, 8000)}` : '',
+    cleanText(input.compiledPrompt, 12000) ? `当前时间轴：\n${cleanText(input.compiledPrompt, 12000)}` : '',
+    blocks.length ? `当前镜头草稿：\n${blocks.map((block, index) => {
+      return `镜头${index + 1}: ${block.mentionToken || timelineMentionToken(block.imageName || block.title || `镜头${index + 1}`)} / ${block.durationSec}s / ${block.prompt || '(空)'}`;
+    }).join('\n')}` : '',
+    `参考图数量：${Math.max(0, Math.floor(Number(input.referenceImageCount) || 0))}`,
+    '请输出可执行 JSON。',
+  ].filter(Boolean).join('\n\n');
+  return { system, user };
 }

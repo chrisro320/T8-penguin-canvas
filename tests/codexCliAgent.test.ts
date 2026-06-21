@@ -618,6 +618,22 @@ test('Codex creator prompt does not auto-enable image generation in LLM mode', (
   assert.doesNotMatch(prompt, /image_generation/);
 });
 
+test('Codex creator prompt does not auto-enable image generation in planning mode', () => {
+  const runner = require('../backend/src/utils/codexCliRunner.js');
+
+  const prompt = runner.makeCreatorPrompt({
+    preset: '时间轴图像规划',
+    mode: 'storyboard',
+    prompt: '读取元脚本并规划关键帧 JSON，后续再交给 image2 生图',
+    selectedSkillNames: ['imagegen'],
+    planningOnly: true,
+  });
+
+  assert.match(prompt, /\$imagegen/);
+  assert.doesNotMatch(prompt, /必须直接生成图片文件/);
+  assert.doesNotMatch(prompt, /当前 Codex CLI 提供 image_generation/);
+});
+
 test('Codex simple creator mode has explicit LLM IMG intent, model defaults, imagegen default skill, and image-first publishing', () => {
   const node = read('../src/components/nodes/CodexCliAgentNode.tsx');
 
@@ -904,7 +920,10 @@ test('Codex creator product library supports durable deletion and batch cleanup'
   assert.match(node, /generatedImages:\s*\[\]/);
   assert.match(node, /directImageUrls:\s*\[\]/);
   assert.match(runner, /function collectCodexRunArtifacts/);
-  assert.match(runner, /return artifactsByText\.length\s*\?\s*dedupeArtifacts\(artifactsByText\)\s*:\s*dedupeArtifacts\(artifactsByWorkspace\)/);
+  // 新生成优先: workspace 新产物在前, 文本只采纳远程 / 应用托管 URL (丢弃旧本地路径), 防止回退展示旧图。
+  assert.match(runner, /const artifactsByWorkspace[\s\S]{0,200}createdAfterMs: startedAt/);
+  assert.match(runner, /REMOTE_ARTIFACT_URL_RE\.test/);
+  assert.match(runner, /return dedupeArtifacts\(\[\.\.\.artifactsByWorkspace, \.\.\.artifactsByText\]\)/);
   assert.match(runner, /partialArtifacts/);
   assert.match(runner, /error\.artifacts\s*=\s*partialArtifacts/);
   assert.match(route, /const errorArtifacts = Array\.isArray\(error\?\.artifacts\)/);

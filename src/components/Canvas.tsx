@@ -437,6 +437,7 @@ const INITIAL_DATA: Record<string, Record<string, any>> = {
     providerSource: 'external',
     blocks: [],
     globalStyle: '',
+    resolution: '2k',
     generateAudio: true,
     seed: -1,
     llmMode: 'segment',

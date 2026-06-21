@@ -658,17 +658,27 @@ function dedupeArtifacts(artifacts) {
   return out;
 }
 
+// 远程 / 应用托管的 URL 才允许从回复文本里采纳; 本地磁盘路径常是输入的旧参考图,
+// 一旦采纳会把上次/上月的旧图当成本轮产物回退展示, 故一律丢弃, 改由 workspace 新产物兜底。
+const REMOTE_ARTIFACT_URL_RE = /^(https?:|data:|\/files\/)/i;
+
 function collectCodexRunArtifacts(fullText, workspace, startedAt) {
   const artifactUrlCache = new Map();
-  const artifactsByText = extractArtifactsFromText(fullText).map((item) => ({
-    ...item,
-    url: normalizeArtifactUrl(item.url, workspace.dir, artifactUrlCache),
-    urls: (item.urls || []).map((url) => normalizeArtifactUrl(url, workspace.dir, artifactUrlCache)),
-  }));
-  const artifactsByWorkspace = extractArtifactsFromWorkspace(workspace, artifactUrlCache, { createdAfterMs: startedAt });
-  return artifactsByText.length
-    ? dedupeArtifacts(artifactsByText)
-    : dedupeArtifacts(artifactsByWorkspace);
+  // 新生成优先: workspace 输出目录里 startedAt 之后落盘的文件是本轮权威新产物。
+  const artifactsByWorkspace = dedupeArtifacts(
+    extractArtifactsFromWorkspace(workspace, artifactUrlCache, { createdAfterMs: startedAt }),
+  );
+  // 文本只采纳真正的远程 / 应用托管 URL; 文本里提到的本地磁盘路径(旧参考图)直接丢弃。
+  const artifactsByText = dedupeArtifacts(
+    extractArtifactsFromText(fullText)
+      .map((item) => ({
+        ...item,
+        urls: (item.urls || [item.url]).filter((url) => REMOTE_ARTIFACT_URL_RE.test(String(url || '').trim())),
+      }))
+      .filter((item) => REMOTE_ARTIFACT_URL_RE.test(String(item.url || '').trim()) && item.urls.length),
+  );
+  // 合并去重, 新产物在前。两者皆空才返回空。
+  return dedupeArtifacts([...artifactsByWorkspace, ...artifactsByText]);
 }
 
 function parseFrontmatter(raw) {
@@ -885,7 +895,7 @@ function makeCreatorPrompt(body = {}) {
     ? body.selectedSkillNames.map((item) => String(item || '').trim()).filter(Boolean)
     : [];
   const selectedSkillText = selectedSkillNames.join(' ');
-  const imageGenerationIntent = body.llmOnly === true
+  const imageGenerationIntent = body.llmOnly === true || body.planningOnly === true
     ? false
     : body.imageGeneration === true
       || /(^|[\s$:/_-])(imagegen|imagen|image-generation|image_generation|generate-image|图片生成|图像生成)([\s$:/_-]|$)/i.test(selectedSkillText)
@@ -923,7 +933,7 @@ function makeCreatorPrompt(body = {}) {
     instructions.push(`已连接 ${body.audios.length} 个音频素材；如果不能直接读取音频，请先基于文件名和用户描述生成声音/配音方案。`);
   }
   const presetHint = `${preset} ${body.mode || ''} ${body.command || ''}`;
-  if (imageGenerationIntent || (/图像|image|商品图|product/i.test(presetHint) && body.llmOnly !== true)) {
+  if (imageGenerationIntent || (/图像|image|商品图|product/i.test(presetHint) && body.llmOnly !== true && body.planningOnly !== true)) {
     instructions.push('图像生成模式：如果当前 Codex CLI 提供 image_generation 工具，必须直接生成图片文件，并在最终回复中给出 Markdown 图片链接或本地文件路径；不要只输出提示词文本。只有在工具确实不可用时，才明确说明工具不可用并退回输出可投喂 Midjourney / Seedream / GPT Image 的完整提示词。');
   }
   instructions.push('如果生成了图片、视频、音频或文件，请在最终回复中用 Markdown 链接列出产物路径，方便画布自动收集。');
@@ -972,10 +982,32 @@ async function runCodexExecStream(body = {}, handlers = {}) {
     let fullText = '';
     let stderrText = '';
     let stdoutBuffer = '';
+    let idleTimer = null;
+
+    // 空闲超时看门狗: codex 进程产完文本却不退出(常驻/上游重连卡死)时, 后端 await 会永挂,
+    // 前端流式 reader 随之永挂、转圈不停。这里在长时间无任何输出后主动 kill 并 reject,
+    // 让流式 done(error) 正常下发、前端 finally 复位。每次有输出都会重置计时。
+    const IDLE_TIMEOUT_MS = Math.max(30000, Number(body.streamIdleTimeoutMs || process.env.T8_CODEX_STREAM_IDLE_MS || 180000));
+    const clearIdle = () => { if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; } };
+    const resetIdle = () => {
+      if (settled) return;
+      clearIdle();
+      idleTimer = setTimeout(() => {
+        try { child?.kill(); } catch { /* ignore */ }
+        const error = new Error(`Codex CLI 在 ${Math.round(IDLE_TIMEOUT_MS / 1000)}s 内无任何输出, 已判定为卡死并中断(可能是上游 API 连接失败在反复重连)。`);
+        error.partialText = fullText.trim();
+        error.artifacts = collectCodexRunArtifacts(fullText, workspace, startedAt);
+        error.workspace = workspace.dir;
+        error.elapsedMs = Date.now() - startedAt;
+        settle(reject, error);
+      }, IDLE_TIMEOUT_MS);
+      if (typeof idleTimer.unref === 'function') idleTimer.unref();
+    };
 
     const settle = (fn, value) => {
       if (settled) return;
       settled = true;
+      clearIdle();
       if (handlers.signal && onAbort) handlers.signal.removeEventListener('abort', onAbort);
       fn(value);
     };
@@ -1001,6 +1033,8 @@ async function runCodexExecStream(body = {}, handlers = {}) {
 
     if (handlers.signal) handlers.signal.addEventListener('abort', onAbort, { once: true });
 
+    resetIdle();
+
     if (child.__codexResolved?.fromWindowsApps) {
       handlers.onProgress?.('检测到 WindowsApps Codex 入口，建议使用 npm 安装的 codex.cmd 或在节点设置中填写真实路径。', { type: 'executable.warning' });
     }
@@ -1012,6 +1046,7 @@ async function runCodexExecStream(body = {}, handlers = {}) {
     });
 
     child.stdout?.on('data', (chunk) => {
+      resetIdle();
       stdoutBuffer += chunk.toString('utf8');
       let index = stdoutBuffer.indexOf('\n');
       while (index >= 0) {
@@ -1033,6 +1068,7 @@ async function runCodexExecStream(body = {}, handlers = {}) {
     });
 
     child.stderr?.on('data', (chunk) => {
+      resetIdle();
       stderrText += chunk.toString('utf8');
       const message = chunk.toString('utf8').trim();
       if (shouldForwardCodexStderr(message)) handlers.onProgress?.(message, { type: 'stderr', message });
