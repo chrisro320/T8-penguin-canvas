@@ -264,14 +264,19 @@ test('Codex CLI runner builds safe exec args, parses JSONL, and extracts artifac
   const oldTime = new Date(Date.now() - 60_000);
   utimesSync(oldFile, oldTime, oldTime);
   const scanStartedAt = Date.now();
+  const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d]);
   const newFile = path.join(scanOutput, 'bernini_bilibili_cover_9x16_final.png');
-  writeFileSync(newFile, 'new');
+  writeFileSync(newFile, PNG_MAGIC);
+  // 命名成 .png 但内容是垃圾文本(3 字节)的占位文件, 不能被当成真实产物收集。
+  const junkFile = path.join(scanOutput, 'junk-named-as-image.png');
+  writeFileSync(junkFile, 'new');
   const scannedArtifacts = runner.extractArtifactsFromWorkspaceForTests(
     { dir: scanRoot, outputDir: path.join(scanRoot, 'output') },
     new Map(),
     { createdAfterMs: scanStartedAt },
   );
   assert.equal(scannedArtifacts.some((item: any) => item.title === 'old-from-previous-run.png'), false);
+  assert.equal(scannedArtifacts.some((item: any) => item.title === 'junk-named-as-image.png'), false);
   assert.equal(scannedArtifacts.some((item: any) => item.title === 'bernini_bilibili_cover_9x16_final.png'), true);
 });
 

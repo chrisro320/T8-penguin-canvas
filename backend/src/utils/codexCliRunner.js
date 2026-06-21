@@ -585,6 +585,29 @@ function extractArtifactsFromText(text) {
   return out;
 }
 
+// 校验文件是否是「真实媒体」而非命名成 .png 的垃圾(如内容为 "new" 的 3 字节文本)。
+// 图片按 magic bytes 严校；其它媒体按最小体积兜底, 挡掉空/占位文件。
+function isLikelyRealMediaFile(filePath, kind) {
+  try {
+    const stat = fs.statSync(filePath);
+    if (!stat.isFile() || stat.size < 8) return false;
+    if (kind !== 'image') return stat.size > 64;
+    const fd = fs.openSync(filePath, 'r');
+    const buf = Buffer.alloc(12);
+    const read = fs.readSync(fd, buf, 0, 12, 0);
+    fs.closeSync(fd);
+    if (read < 4) return false;
+    const isPng = buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47;
+    const isJpg = buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;
+    const isGif = buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x38;
+    const isWebp = buf.subarray(0, 4).toString('ascii') === 'RIFF' && buf.subarray(8, 12).toString('ascii') === 'WEBP';
+    const isBmp = buf[0] === 0x42 && buf[1] === 0x4d;
+    return isPng || isJpg || isGif || isWebp || isBmp;
+  } catch {
+    return false;
+  }
+}
+
 function normalizeArtifactUrl(filePathOrUrl, baseDir = '', cache) {
   const text = String(filePathOrUrl || '').trim();
   if (!text) return '';
@@ -609,18 +632,23 @@ function extractArtifactsFromWorkspace(workspace, cache, options = {}) {
   const out = [];
   const seen = new Set();
   const createdAfterMs = Number(options.createdAfterMs || 0);
+  // 输入参考图被复制进 inputs/（每轮新 mtime），绝不能当成本轮产物返回, 否则会把用户喂的
+  // 参考图 / 界面截图当成生成结果显示。扫描时跳过该目录。
+  const inputDir = workspace?.inputDir ? path.resolve(workspace.inputDir) : '';
   const visit = (dir, depth = 0) => {
     if (!dir || depth > 3 || !fs.existsSync(dir)) return;
+    if (inputDir && path.resolve(dir) === inputDir) return;
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) {
-        if (!['node_modules', '.git', '.agents', '.codex'].includes(entry.name)) visit(full, depth + 1);
+        if (!['node_modules', '.git', '.agents', '.codex', 'inputs'].includes(entry.name)) visit(full, depth + 1);
         continue;
       }
       const kind = kindFromUrl(full);
       if (!kind) continue;
       const stat = fs.statSync(full);
       if (createdAfterMs > 0 && stat.mtimeMs + 1000 < createdAfterMs) continue;
+      if (!isLikelyRealMediaFile(full, kind)) continue;
       const url = normalizeArtifactUrl(full, '', cache);
       const key = `${kind}:${url}`;
       if (seen.has(key)) continue;
@@ -658,24 +686,48 @@ function dedupeArtifacts(artifacts) {
   return out;
 }
 
-// 远程 / 应用托管的 URL 才允许从回复文本里采纳; 本地磁盘路径常是输入的旧参考图,
-// 一旦采纳会把上次/上月的旧图当成本轮产物回退展示, 故一律丢弃, 改由 workspace 新产物兜底。
+// 远程 / 应用托管的 URL 直接采纳。
 const REMOTE_ARTIFACT_URL_RE = /^(https?:|data:|\/files\/)/i;
+
+// 文本里提到的本地路径, 只有满足「本轮新建 + 真实媒体 + 不在 inputs/ 下」才算产物,
+// 借此既接住 codex 真生成到本地的图, 又挡掉旧参考图 / 输入截图 / 垃圾占位文件。
+function isFreshLocalArtifactPath(rawPath, workspace, startedAt, inputDir) {
+  const text = String(rawPath || '').trim();
+  if (!text || REMOTE_ARTIFACT_URL_RE.test(text)) return false;
+  const resolved = path.resolve(path.isAbsolute(text) ? text : path.join(workspace?.dir || process.cwd(), text));
+  if (inputDir && resolved.startsWith(inputDir)) return false;
+  if (!fs.existsSync(resolved)) return false;
+  const kind = kindFromUrl(resolved);
+  if (!kind) return false;
+  const stat = fs.statSync(resolved);
+  if (Number(startedAt) > 0 && stat.mtimeMs + 1000 < Number(startedAt)) return false;
+  return isLikelyRealMediaFile(resolved, kind);
+}
 
 function collectCodexRunArtifacts(fullText, workspace, startedAt) {
   const artifactUrlCache = new Map();
-  // 新生成优先: workspace 输出目录里 startedAt 之后落盘的文件是本轮权威新产物。
+  const inputDir = workspace?.inputDir ? path.resolve(workspace.inputDir) : '';
+  // 新生成优先: workspace 输出目录里 startedAt 之后落盘的真实媒体是本轮权威新产物。
   const artifactsByWorkspace = dedupeArtifacts(
     extractArtifactsFromWorkspace(workspace, artifactUrlCache, { createdAfterMs: startedAt }),
   );
-  // 文本只采纳真正的远程 / 应用托管 URL; 文本里提到的本地磁盘路径(旧参考图)直接丢弃。
+  // 文本: 远程 URL 直接采纳; 本地路径仅当是本轮新生成的真图才采纳(拷贝归一化), 其余丢弃。
+  const acceptTextUrl = (raw) => {
+    const text = String(raw || '').trim();
+    if (!text) return '';
+    if (REMOTE_ARTIFACT_URL_RE.test(text)) return text;
+    if (isFreshLocalArtifactPath(text, workspace, startedAt, inputDir)) {
+      return normalizeArtifactUrl(text, workspace?.dir || '', artifactUrlCache);
+    }
+    return '';
+  };
   const artifactsByText = dedupeArtifacts(
     extractArtifactsFromText(fullText)
-      .map((item) => ({
-        ...item,
-        urls: (item.urls || [item.url]).filter((url) => REMOTE_ARTIFACT_URL_RE.test(String(url || '').trim())),
-      }))
-      .filter((item) => REMOTE_ARTIFACT_URL_RE.test(String(item.url || '').trim()) && item.urls.length),
+      .map((item) => {
+        const urls = (item.urls || [item.url]).map(acceptTextUrl).filter(Boolean);
+        return { ...item, url: acceptTextUrl(item.url) || urls[0] || '', urls };
+      })
+      .filter((item) => item.url && item.urls.length),
   );
   // 合并去重, 新产物在前。两者皆空才返回空。
   return dedupeArtifacts([...artifactsByWorkspace, ...artifactsByText]);
@@ -934,7 +986,7 @@ function makeCreatorPrompt(body = {}) {
   }
   const presetHint = `${preset} ${body.mode || ''} ${body.command || ''}`;
   if (imageGenerationIntent || (/图像|image|商品图|product/i.test(presetHint) && body.llmOnly !== true && body.planningOnly !== true)) {
-    instructions.push('图像生成模式：如果当前 Codex CLI 提供 image_generation 工具，必须直接生成图片文件，并在最终回复中给出 Markdown 图片链接或本地文件路径；不要只输出提示词文本。只有在工具确实不可用时，才明确说明工具不可用并退回输出可投喂 Midjourney / Seedream / GPT Image 的完整提示词。');
+    instructions.push('图像生成模式：如果当前 Codex CLI 提供 image_generation 工具，必须直接生成图片文件，并把生成的图片文件保存到环境变量 $T8_CODEX_OUTPUT_DIR 指向的目录（即工作区 outputs/ 目录），再在最终回复中给出该文件的本地路径或 Markdown 图片链接；不要把参考图/输入图当成生成结果，不要只输出提示词文本。只有在工具确实不可用时，才明确说明工具不可用并退回输出可投喂 Midjourney / Seedream / GPT Image 的完整提示词。');
   }
   instructions.push('如果生成了图片、视频、音频或文件，请在最终回复中用 Markdown 链接列出产物路径，方便画布自动收集。');
   instructions.push(`用户任务：\n${prompt || '请根据上游素材给出创作方案。'}`);

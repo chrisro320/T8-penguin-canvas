@@ -290,15 +290,19 @@ test('timeline director frontend exposes storyboard-aligned controls without sho
   assert.match(node, /创作工作区/);
   assert.match(node, /Skill · 模型 · 后端参数/);
   assert.match(node, /Skill 列表/);
-  assert.doesNotMatch(node, /模板分类/);
-  assert.doesNotMatch(node, /创作模板/);
-  assert.doesNotMatch(node, /生成后自动发布到画布输出/);
-  assert.doesNotMatch(node, /提示词持久化/);
-  assert.doesNotMatch(node, /素材持久化/);
+  // 对齐 CodexCliAgentNode：补齐创作模板/分类/工坊与运行偏好（提示词、素材持久化、自动发布）。
+  assert.match(node, /模板分类/);
+  assert.match(node, /创作模板/);
+  assert.match(node, /生成后自动发布到画布输出/);
+  assert.match(node, /提示词持久化/);
+  assert.match(node, /素材持久化/);
+  assert.match(node, /buildPresetInstructionBlock/);
+  assert.match(node, /sanitizeCreatorPresets/);
+  assert.match(node, /codexUserPresets/);
   assert.match(node, /工作台工具/);
   assert.match(node, /handleCodexStudioRun\('storyboardQuickSplit'\)/);
   assert.match(node, /title="打开真实 Codex Skill 列表"/);
-  assert.doesNotMatch(node, /模板工坊/);
+  assert.match(node, /模板工坊/);
   assert.match(node, />\s*项目 Skill\s*</);
   assert.match(node, /创作台记忆/);
   assert.doesNotMatch(node, /自动压缩成长期记忆/);
@@ -356,7 +360,7 @@ test('timeline director frontend exposes storyboard-aligned controls without sho
   assert.match(node, /codexTaskMentionedMedia\.images/);
   assert.match(node, /onClick=\{\(\) => void handleCodexStudioRun\(\)\}/);
   assert.match(node, /handleCodexStudioRun\('storyboardQuickSplit'\)/);
-  assert.match(node, /脚本快拆模式：先理解脚本和参考图，再生成 2K 宫格关键帧并写回镜头/);
+  assert.match(node, /脚本快拆模式（预设增强发送）/);
   assert.match(node, /USER/);
   assert.match(node, /CODEX/);
   assert.match(node, /agentStoryboardStatus/);

@@ -88,6 +88,58 @@ const genId = (p: string) => `${p}-${Date.now().toString(36)}-${Math.random().to
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 const round1 = (v: number) => Math.round(v * 10) / 10;
 type CodexStudioRunMode = 'normal' | 'storyboardQuickSplit';
+
+// === 创作模板系统（对齐 CodexCliAgentNode：用户自建模板 + 分类 + 指令注入） ===
+const DEFAULT_CREATOR_CATEGORY = '未分类';
+const NO_CREATOR_PRESET_ID = '__none__';
+interface TimelineCreatorPreset {
+  id: string;
+  label: string;
+  command: string;
+  hint: string;
+  systemHint: string;
+  category: string;
+}
+const DEFAULT_CREATOR_PRESET: TimelineCreatorPreset = {
+  id: 'default',
+  label: '默认创作',
+  command: '/chat',
+  hint: '按当前任务自由创作',
+  systemHint: '保持流式协作，先理解创作目标，再给可执行的最终产物或下一步方案。',
+  category: DEFAULT_CREATOR_CATEGORY,
+};
+function sanitizeCreatorCategory(value: any) {
+  const text = String(value || '').trim().replace(/\s+/g, ' ').slice(0, 32);
+  return text || DEFAULT_CREATOR_CATEGORY;
+}
+function sanitizeCreatorPresets(value: any): TimelineCreatorPreset[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item): TimelineCreatorPreset | null => {
+      const label = String(item?.label || item?.name || '').trim();
+      const systemHint = String(item?.systemHint || item?.prompt || '').trim();
+      if (!label || !systemHint) return null;
+      return {
+        id: String(item?.id || `user-${label}`).replace(/\s+/g, '-').slice(0, 64),
+        label,
+        command: String(item?.command || '/custom').trim() || '/custom',
+        hint: String(item?.hint || item?.description || '').trim() || '用户自定义创作模板',
+        systemHint,
+        category: sanitizeCreatorCategory(item?.category),
+      };
+    })
+    .filter((item): item is TimelineCreatorPreset => !!item)
+    .slice(0, 24);
+}
+function buildPresetInstructionBlock(preset: TimelineCreatorPreset) {
+  const lines = [
+    preset.label ? `当前创作模板：${preset.label}` : '',
+    preset.category ? `模板分类：${preset.category}` : '',
+    preset.hint ? `模板用途：${preset.hint}` : '',
+    preset.systemHint ? `模板指令：\n${preset.systemHint}` : '',
+  ].filter(Boolean);
+  return lines.length ? `创作模板指令：\n${lines.join('\n')}` : '';
+}
 const newBlock = (): Block => sanitizeTimelineDirectorBlocks([{
   id: genId('blk'),
   title: '',
@@ -254,6 +306,86 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
   const resolution: string = d.resolution || '2k';
   const codexSessionId = String(d.codexSessionId || `${id}:timeline-default`);
   const codexAgentTaskPrompt = typeof d.codexAgentTaskPrompt === 'string' ? d.codexAgentTaskPrompt : '';
+  // 创作模板派生（用户自建，存 d.codexUserPresets）
+  const customPresets = useMemo(() => sanitizeCreatorPresets(d.codexUserPresets), [d.codexUserPresets]);
+  const presetId = String(d.codexPresetId || d.codexPreset || NO_CREATOR_PRESET_ID);
+  const selectedCreatorPreset = presetId === NO_CREATOR_PRESET_ID
+    ? null
+    : customPresets.find((item) => item.id === presetId || item.label === presetId) || null;
+  const hasActiveCreatorPreset = Boolean(selectedCreatorPreset);
+  const currentPreset = selectedCreatorPreset || DEFAULT_CREATOR_PRESET;
+  const templateCategories = useMemo(() => {
+    const categories = new Set<string>(['全部']);
+    customPresets.forEach((preset) => categories.add(sanitizeCreatorCategory(preset.category)));
+    return Array.from(categories);
+  }, [customPresets]);
+  const codexTemplateSelectCategory = String(d.codexTemplateSelectCategory || '全部');
+  const visibleSelectableCreatorPresets = useMemo(() => (
+    codexTemplateSelectCategory === '全部'
+      ? customPresets
+      : customPresets.filter((preset) => sanitizeCreatorCategory(preset.category) === codexTemplateSelectCategory)
+  ), [codexTemplateSelectCategory, customPresets]);
+  // 运行偏好：自动发布（默认开）/ 提示词持久化 / 素材持久化
+  const codexAutoPublishOutput = d.codexAutoPublishOutput !== false;
+  const codexPersistPrompt = d.codexPersistPrompt === true;
+  const codexPersistMaterials = d.codexPersistMaterials === true;
+  // 模板工坊
+  const [templateWorkshopOpen, setTemplateWorkshopOpen] = useState(false);
+  const [editingPresetId, setEditingPresetId] = useState('');
+  const [presetDraftTitle, setPresetDraftTitle] = useState('');
+  const [presetDraftCategory, setPresetDraftCategory] = useState('');
+  const [presetDraftHint, setPresetDraftHint] = useState('');
+  const [presetDraftPrompt, setPresetDraftPrompt] = useState('');
+  const clearPresetDraft = () => {
+    setEditingPresetId('');
+    setPresetDraftTitle('');
+    setPresetDraftCategory('');
+    setPresetDraftHint('');
+    setPresetDraftPrompt('');
+  };
+  const startEditPreset = (preset: TimelineCreatorPreset) => {
+    setEditingPresetId(preset.id);
+    setPresetDraftTitle(preset.label);
+    setPresetDraftCategory(preset.category === DEFAULT_CREATOR_CATEGORY ? '' : preset.category);
+    setPresetDraftHint(preset.hint);
+    setPresetDraftPrompt(preset.systemHint);
+  };
+  const saveTimelinePreset = () => {
+    const label = presetDraftTitle.trim();
+    const systemHint = presetDraftPrompt.trim();
+    if (!label || !systemHint) {
+      setError('模板需要填写名称和模板指令');
+      return;
+    }
+    const nextPreset: TimelineCreatorPreset = {
+      id: editingPresetId || `user-${Date.now().toString(36)}-${label}`.replace(/\s+/g, '-').slice(0, 64),
+      label,
+      command: '/custom',
+      hint: presetDraftHint.trim() || '用户自定义创作模板',
+      systemHint,
+      category: sanitizeCreatorCategory(presetDraftCategory),
+    };
+    const next = editingPresetId
+      ? customPresets.map((preset) => (preset.id === editingPresetId ? nextPreset : preset))
+      : [nextPreset, ...customPresets];
+    update({
+      codexUserPresets: next.slice(0, 24),
+      codexPresetId: nextPreset.id,
+      codexPreset: nextPreset.label,
+      codexTemplateSelectCategory: nextPreset.category,
+    });
+    logBus.success(`${editingPresetId ? '已保存' : '已新增'}创作模板：${nextPreset.label}`, src);
+    clearPresetDraft();
+  };
+  const deleteTimelinePreset = (preset: TimelineCreatorPreset) => {
+    const next = customPresets.filter((item) => item.id !== preset.id);
+    update({
+      codexUserPresets: next,
+      ...(currentPreset.id === preset.id ? { codexPresetId: NO_CREATOR_PRESET_ID, codexPreset: '' } : {}),
+    });
+    if (editingPresetId === preset.id) clearPresetDraft();
+    logBus.success(`已删除创作模板：${preset.label}`, src);
+  };
   const codexAgentTaskPromptMentions: MediaMention[] = Array.isArray(d.codexAgentTaskPromptMentions) ? d.codexAgentTaskPromptMentions : [];
   const agentStoryboardOutputUrls = useMemo(() => dedupe(Array.isArray(d.agentStoryboardOutputUrls) ? d.agentStoryboardOutputUrls : []), [d.agentStoryboardOutputUrls]);
   const agentStoryboardGridImageUrl = String(d.agentStoryboardGridImageUrl || '').trim();
@@ -591,7 +723,14 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
       artifactCount: agentStoryboardOutputUrls.length + (agentStoryboardGridImageUrl ? 1 : 0) + (agentStoryboardPlanText ? 1 : 0),
       snapshot,
     };
-    return [nextEntry, ...codexTimelineSessions.filter((session: any) => session.id !== nextSessionId)].slice(0, 12);
+    // 已存在的会话原位更新（保持列表顺序不变，避免选中后跳到最上）；新会话才前插。
+    const existingIndex = codexTimelineSessions.findIndex((session: any) => session.id === nextSessionId);
+    if (existingIndex >= 0) {
+      const next = [...codexTimelineSessions];
+      next[existingIndex] = nextEntry;
+      return next.slice(0, 12);
+    }
+    return [nextEntry, ...codexTimelineSessions].slice(0, 12);
   };
   const startNewTimelineSession = () => {
     cancelActiveAgentRun();
@@ -1241,8 +1380,12 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
     let streamedText = '';
     const artifactImageUrls: string[] = [];
     const isStoryboardQuickSplit = runMode === 'storyboardQuickSplit';
-    const modeLabel = isStoryboardQuickSplit ? '脚本快拆模式：先理解脚本和参考图，再生成 2K 宫格关键帧并写回镜头。' : '';
-    const startMessage = buildCodexConversation(userPrompt, 'Codex Agent 正在执行任务...', { modeLabel });
+    const modeLabel = isStoryboardQuickSplit ? '脚本快拆模式：预设增强发送 —— 自动拼入拆镜预置参数后发送到会话，输出拆镜方案文本。' : '';
+    // 多轮会话：保留已有对话作为前缀，新一轮追加在后，避免新消息覆盖旧消息。
+    const priorConversation = String(d.agentMessage || agentMessage || '').trim();
+    const composeConversation = (codexText: string, options: { modeLabel?: string } = {}) =>
+      [priorConversation, buildCodexConversation(userPrompt, codexText, options)].filter(Boolean).join('\n\n──────────\n\n');
+    const startMessage = composeConversation('Codex Agent 正在执行任务...', { modeLabel });
     setError(null);
     const runToken = ++agentRunTokenRef.current;
     const runController = new AbortController();
@@ -1250,20 +1393,26 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
     const isActiveRun = () => agentRunTokenRef.current === runToken;
     setAgentExecuting(true);
     setAgentMessage(startMessage);
-    update({ agentMessage: startMessage, status: 'running' });
+    // 提示词持久化关闭时：发送瞬间即清空输入任务框（对齐 CodexCliAgent 的 startPatch 行为）。
+    update({
+      agentMessage: startMessage,
+      status: 'running',
+      ...(codexPersistPrompt ? {} : { codexAgentTaskPrompt: '', codexAgentTaskPromptMentions: [] }),
+    });
     try {
       const result = await streamCodexCliAgent({
         nodeId: id,
         sessionId: codexSessionId,
         mode: 'chat',
         command: '/chat',
-        preset: '时间轴导演台',
+        preset: hasActiveCreatorPreset ? currentPreset.label : '时间轴导演台',
         prompt: [
+          hasActiveCreatorPreset ? buildPresetInstructionBlock(currentPreset) : '',
           '你是时间轴导演台内嵌的 Codex CLI Agent 通用创作工作台。',
           '你可以根据用户任务分析脚本、参考图、素材、提示词、视频方案或产出文本方案。',
           isStoryboardQuickSplit
-            ? '本轮为脚本快拆模式。请先输出拆镜思路、镜头数建议、每镜头时长建议、关键帧生成要点；随后系统会继续调用时间轴导演台真实快拆链路：LLM 拆镜 JSON -> image2 生成 2K 宫格图 -> 自动切图 -> 写回每个镜头。'
-            : '不要默认改写时间轴镜头。只有用户明确要求，才输出可供脚本快拆使用的镜头建议；实际自动写回镜头和关键帧由“脚本快拆”同级执行模式完成。',
+            ? '本轮为脚本快拆模式（预设增强发送）：请基于元脚本、参考图和素材，输出完整拆镜方案——拆镜思路、镜头数建议、每镜头时长建议、每个镜头的画面/关键帧提示词要点。只输出文本方案到会话即可，不要在本轮生成图片、不要调用 image_generation、不要写回时间轴镜头。'
+            : '不要默认改写时间轴镜头。只有用户明确要求，才输出可供脚本快拆使用的镜头建议。',
           upstreamTextContext ? `上游文本素材：\n${upstreamTextContext}` : '',
           resolvedGlobalPrompt ? `当前全局提示词：\n${resolvedGlobalPrompt}` : '',
           compiledPrompt ? `当前时间轴发送 Prompt：\n${compiledPrompt}` : '',
@@ -1274,6 +1423,9 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
         videos: referenceVideos,
         audios: referenceAudios,
         selectedSkillNames: selectedCodexSkillNames,
+        // 启用 image_generation：普通发送允许直接生图（对齐 CodexCliAgent）；脚本快拆只做文本规划。
+        imageGeneration: !isStoryboardQuickSplit,
+        planningOnly: isStoryboardQuickSplit,
         workspaceDir: String(d.codexWorkspaceDir || '').trim(),
         model: String(d.codexModel || TIMELINE_CODEX_DEFAULT_MODEL).trim(),
         profile: String(d.codexProfile || '').trim(),
@@ -1289,7 +1441,7 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
         onDelta: (delta) => {
           if (!isActiveRun()) return;
           streamedText += delta;
-          const nextMessage = buildCodexConversation(userPrompt, streamedText || 'Codex Agent 正在执行任务...', { modeLabel });
+          const nextMessage = composeConversation(streamedText || 'Codex Agent 正在执行任务...', { modeLabel });
           setAgentMessage(nextMessage);
           update({ agentMessage: nextMessage });
         },
@@ -1305,30 +1457,42 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
         : [];
       const imageUrls = dedupe([result.imageUrl || '', ...(Array.isArray(result.imageUrls) ? result.imageUrls : []), ...artifactImageUrls, ...artifactUrls]);
       const finalText = String(result.text || result.reply || streamedText || '').trim();
-      const finalMessage = buildCodexConversation(userPrompt, finalText || 'Codex Agent 已完成任务', { modeLabel });
-      update({
+      const finalMessage = composeConversation(finalText || 'Codex Agent 已完成任务', { modeLabel });
+      const finishPatch: Record<string, any> = {
         status: 'success',
         error: '',
         agentMessage: finalMessage,
-        outputText: finalText,
-        text: finalText,
-        reply: finalText,
-        imageUrl: imageUrls[0] || d.imageUrl || '',
-        imageUrls: imageUrls.length ? imageUrls : d.imageUrls,
         codexLastRunAt: Date.now(),
-      });
-      setAgentMessage(finalMessage);
-      if (isStoryboardQuickSplit) {
-        await handleAgentStoryboard({ preludeText: finalText, allowWhileExecuting: true });
-        return;
+      };
+      // 生成后自动发布到画布输出：开 → 写回输出字段驱动输出端口；关 → 只留会话，需手动发布。
+      if (codexAutoPublishOutput) {
+        finishPatch.outputText = finalText;
+        finishPatch.text = finalText;
+        finishPatch.reply = finalText;
+        finishPatch.imageUrl = imageUrls[0] || d.imageUrl || '';
+        finishPatch.imageUrls = imageUrls.length ? imageUrls : d.imageUrls;
       }
-      logBus.success('时间轴导演台 Codex Agent 任务完成', src);
+      // 提示词持久化关闭时，输入框已在发送瞬间清空（见上方 startPatch），此处不再处理。
+      // 素材持久化：关 → 把本轮消耗的上游素材排除，下轮不再重复发送。
+      if (!codexPersistMaterials) {
+        const consumedIds = [...orderedInputTexts, ...orderedInputImages, ...orderedInputVideos, ...orderedInputAudios]
+          .map((item) => item.id).filter(Boolean);
+        if (consumedIds.length) {
+          let nextExcluded = excludedMaterialIds;
+          consumedIds.forEach((mid) => { nextExcluded = excludeMaterialId(nextExcluded, mid); });
+          finishPatch.excludedMaterialIds = nextExcluded;
+          finishPatch.materialOrder = materialOrder.filter((itemId: string) => !consumedIds.includes(itemId));
+        }
+      }
+      update(finishPatch);
+      setAgentMessage(finalMessage);
+      logBus.success(isStoryboardQuickSplit ? '时间轴导演台 脚本快拆方案已生成' : '时间轴导演台 Codex Agent 任务完成', src);
       taskCompletionSound.notifyComplete(id, 'codex-cli-agent');
     } catch (e: any) {
       if (!isActiveRun()) return;
       const message = e?.message || 'Codex Agent 运行失败';
       setError(message);
-      const nextMessage = buildCodexConversation(userPrompt, message, { modeLabel });
+      const nextMessage = composeConversation(message, { modeLabel });
       update({ status: 'error', error: message, agentMessage: nextMessage });
       setAgentMessage(nextMessage);
     } finally {
@@ -1835,7 +1999,52 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
 
             <section className="mb-4 rounded-xl border-2 p-3" style={{ borderColor: '#111827', background: '#f6eddc' }}>
               <div className="mb-2 text-sm font-black">创作设置</div>
-              <div className="mb-2 text-[11px] font-semibold text-black/55">Skill · 模型 · 后端参数</div>
+              <div className="mb-2 text-[11px] font-semibold text-black/55">模板 · Skill · 模型 · 后端参数</div>
+              <label className="mb-2 grid gap-1 text-[11px] font-semibold text-black/55">
+                模板分类
+                <select
+                  className="nodrag h-8 rounded-lg border-2 px-2 text-xs outline-none"
+                  style={{ borderColor: '#111827', background: '#fffdf6' }}
+                  value={codexTemplateSelectCategory}
+                  onChange={(event) => {
+                    const nextCategory = event.currentTarget.value;
+                    const nextPresets = nextCategory === '全部'
+                      ? customPresets
+                      : customPresets.filter((preset) => sanitizeCreatorCategory(preset.category) === nextCategory);
+                    const currentStillVisible = nextPresets.some((preset) => preset.id === currentPreset.id);
+                    update({
+                      codexTemplateSelectCategory: nextCategory,
+                      ...(hasActiveCreatorPreset && !currentStillVisible ? { codexPresetId: NO_CREATOR_PRESET_ID, codexPreset: '' } : {}),
+                    });
+                  }}
+                >
+                  {templateCategories.map((category) => <option key={category} value={category}>{category}</option>)}
+                </select>
+              </label>
+              <label className="mb-2 grid gap-1 text-[11px] font-semibold text-black/55">
+                创作模板
+                <select
+                  className="nodrag h-8 rounded-lg border-2 px-2 text-xs outline-none"
+                  style={{ borderColor: '#111827', background: '#fffdf6' }}
+                  value={hasActiveCreatorPreset && visibleSelectableCreatorPresets.some((preset) => preset.id === currentPreset.id) ? currentPreset.id : NO_CREATOR_PRESET_ID}
+                  onChange={(event) => {
+                    const nextPresetId = event.currentTarget.value;
+                    if (nextPresetId === NO_CREATOR_PRESET_ID) {
+                      update({ codexPresetId: NO_CREATOR_PRESET_ID, codexPreset: '' });
+                      return;
+                    }
+                    const preset = customPresets.find((item) => item.id === nextPresetId);
+                    if (!preset) return;
+                    update({ codexPresetId: preset.id, codexPreset: preset.label, codexTemplateSelectCategory: sanitizeCreatorCategory(preset.category) });
+                  }}
+                >
+                  <option value={NO_CREATOR_PRESET_ID}>无模板</option>
+                  {visibleSelectableCreatorPresets.length === 0 && <option value="" disabled>当前分类暂无模板</option>}
+                  {visibleSelectableCreatorPresets.map((preset) => (
+                    <option key={preset.id} value={preset.id}>{preset.label} · {sanitizeCreatorCategory(preset.category)}</option>
+                  ))}
+                </select>
+              </label>
               <label className="mb-2 grid gap-1 text-[11px] font-semibold text-black/55">
                 Skill 列表
                 <button
@@ -1862,20 +2071,51 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
                 <input type="checkbox" checked={d.codexWebSearch === true} onChange={(event) => update({ codexWebSearch: event.currentTarget.checked })} />
                 Web Search
               </label>
-              <label className="nodrag flex items-center gap-2 text-xs font-semibold text-black/60">
+              <label className="nodrag mb-3 flex items-center gap-2 text-xs font-semibold text-black/60">
                 <input type="checkbox" checked={d.codexIncludePlanTool === true} onChange={(event) => update({ codexIncludePlanTool: event.currentTarget.checked })} />
                 Plan Tool
               </label>
+              <label className="nodrag mb-2 flex items-start gap-2 rounded-lg border-2 px-2 py-1.5 text-[11px]" style={{ borderColor: '#111827', background: '#fffdf6' }}>
+                <input type="checkbox" className="mt-0.5 shrink-0" checked={codexAutoPublishOutput} onChange={(event) => update({ codexAutoPublishOutput: event.currentTarget.checked })} />
+                <span className="min-w-0">
+                  <span className="block font-black text-black/80">生成后自动发布到画布输出</span>
+                  <span className="block leading-snug text-black/50">关闭后产物只留在会话，需要手动发布。</span>
+                </span>
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                <label className="nodrag flex items-center gap-2 rounded-lg border-2 px-2 py-1.5 text-[11px] font-black text-black/70" style={{ borderColor: '#111827', background: '#fffdf6' }}>
+                  <input type="checkbox" checked={codexPersistPrompt} onChange={(event) => update({ codexPersistPrompt: event.currentTarget.checked })} />
+                  提示词持久化
+                </label>
+                <label className="nodrag flex items-center gap-2 rounded-lg border-2 px-2 py-1.5 text-[11px] font-black text-black/70" style={{ borderColor: '#111827', background: '#fffdf6' }}>
+                  <input type="checkbox" checked={codexPersistMaterials} onChange={(event) => update({ codexPersistMaterials: event.currentTarget.checked, ...(event.currentTarget.checked ? { codexStudioConsumedMaterialIds: [] } : {}) })} />
+                  素材持久化
+                </label>
+              </div>
             </section>
 
             <section className="rounded-xl border-2 p-3" style={{ borderColor: '#111827', background: '#f6eddc' }}>
               <div className="mb-2 text-sm font-black">工作台工具</div>
+              <div className="mb-2 grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  className="nodrag rounded-lg border-2 px-2 py-2 text-xs font-black"
+                  style={{ borderColor: '#111827', background: templateWorkshopOpen ? '#5ccbc2' : '#fffdf6' }}
+                  onClick={() => { setEditingPresetId(''); setTemplateWorkshopOpen(true); }}
+                  title="新建/编辑创作模板，保存后出现在模板下拉里"
+                >
+                  模板工坊
+                </button>
+                <div className="flex items-center justify-center rounded-lg border-2 px-2 py-2 text-[11px] font-semibold text-black/55" style={{ borderColor: '#111827', background: '#fffdf6' }}>
+                  已建 {customPresets.length} 个模板
+                </div>
+              </div>
               <div className="grid grid-cols-2 gap-2">
                 <button
                   type="button"
                   className="nodrag rounded-lg border-2 px-2 py-2 text-xs font-black disabled:opacity-50"
                   style={{ borderColor: '#111827', background: '#fffdf6' }}
-                  disabled={agentExecuting || !codexImageGenerationReady || !keyframeTextReady}
+                  disabled={agentExecuting || !codexCliReady || !keyframeTextReady}
                   onClick={() => void handleCodexStudioRun('storyboardQuickSplit')}
                   title={codexKeyframeTitle}
                 >
@@ -2037,6 +2277,58 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
     document.body,
   ) : null;
 
+  const templateWorkshopModal = templateWorkshopOpen && typeof document !== 'undefined' ? createPortal(
+    <div className="fixed inset-0 z-[2147483646] flex items-center justify-center bg-black/55 p-4" onClick={() => setTemplateWorkshopOpen(false)}>
+      <div
+        className="grid max-h-[80vh] w-full max-w-3xl gap-3 overflow-y-auto rounded-2xl border-2 p-4 md:grid-cols-[260px_minmax(0,1fr)]"
+        style={{ borderColor: '#111827', background: '#f6eddc', color: '#111827' }}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <section className="min-h-0 rounded-xl border-2 p-3" style={{ borderColor: '#111827', background: '#fffdf6' }}>
+          <div className="mb-2 flex items-center justify-between">
+            <div className="text-sm font-black">我的模板</div>
+            <button type="button" className="nodrag rounded-md border-2 px-2 py-0.5 text-[11px] font-black" style={{ borderColor: '#111827' }} onClick={clearPresetDraft}>+ 新建</button>
+          </div>
+          <div className="grid gap-1.5">
+            {customPresets.length === 0 && <div className="text-[11px] text-black/45">还没有模板，右侧填写后保存。</div>}
+            {customPresets.map((preset) => (
+              <div key={preset.id} className={`flex items-center justify-between gap-2 rounded-lg border-2 px-2 py-1.5 ${editingPresetId === preset.id ? 'ring-2 ring-emerald-400' : ''}`} style={{ borderColor: '#111827' }}>
+                <button type="button" className="nodrag min-w-0 flex-1 text-left" onClick={() => startEditPreset(preset)}>
+                  <div className="truncate text-xs font-black">{preset.label}</div>
+                  <div className="truncate text-[10px] text-black/50">{sanitizeCreatorCategory(preset.category)} · {preset.hint}</div>
+                </button>
+                <button type="button" className="nodrag shrink-0 rounded-md border-2 px-1.5 py-0.5 text-[10px] font-black text-rose-600" style={{ borderColor: '#111827' }} onClick={() => deleteTimelinePreset(preset)}>删</button>
+              </div>
+            ))}
+          </div>
+        </section>
+        <section className="grid min-h-0 content-start gap-2 rounded-xl border-2 p-3" style={{ borderColor: '#111827', background: '#fffdf6' }}>
+          <div className="flex items-center justify-between">
+            <div className="text-sm font-black">{editingPresetId ? '编辑模板' : '新建模板'}</div>
+            <button type="button" className="nodrag rounded-md border-2 px-2 py-0.5 text-[11px] font-black" style={{ borderColor: '#111827' }} onClick={() => setTemplateWorkshopOpen(false)}>关闭</button>
+          </div>
+          <label className="grid gap-1 text-[11px] font-bold text-black/55">模板名称
+            <input className="nodrag h-8 rounded-lg border-2 px-2 text-xs" style={{ borderColor: '#111827' }} value={presetDraftTitle} onChange={(event) => setPresetDraftTitle(event.currentTarget.value)} placeholder="如：电影感分镜拆解" />
+          </label>
+          <label className="grid gap-1 text-[11px] font-bold text-black/55">分类
+            <input className="nodrag h-8 rounded-lg border-2 px-2 text-xs" style={{ borderColor: '#111827' }} value={presetDraftCategory} onChange={(event) => setPresetDraftCategory(event.currentTarget.value)} placeholder="留空=未分类" />
+          </label>
+          <label className="grid gap-1 text-[11px] font-bold text-black/55">用途说明
+            <input className="nodrag h-8 rounded-lg border-2 px-2 text-xs" style={{ borderColor: '#111827' }} value={presetDraftHint} onChange={(event) => setPresetDraftHint(event.currentTarget.value)} placeholder="一句话描述这个模板做什么" />
+          </label>
+          <label className="grid gap-1 text-[11px] font-bold text-black/55">模板指令（systemHint）
+            <textarea className="nodrag min-h-[140px] rounded-lg border-2 px-2 py-1.5 text-xs leading-relaxed" style={{ borderColor: '#111827' }} value={presetDraftPrompt} onChange={(event) => setPresetDraftPrompt(event.currentTarget.value)} placeholder="发送时会拼到 prompt 最前面的创作模板指令。" />
+          </label>
+          <div className="flex gap-2">
+            <button type="button" className="nodrag flex-1 rounded-lg border-2 px-2 py-2 text-xs font-black" style={{ borderColor: '#111827', background: '#5ccbc2' }} onClick={saveTimelinePreset}>{editingPresetId ? '保存修改' : '保存为我的模板'}</button>
+            {editingPresetId && <button type="button" className="nodrag rounded-lg border-2 px-3 py-2 text-xs font-black" style={{ borderColor: '#111827', background: '#fffdf6' }} onClick={clearPresetDraft}>取消编辑</button>}
+          </div>
+        </section>
+      </div>
+    </div>,
+    document.body,
+  ) : null;
+
   const skillPickerPortal = skillPickerOpen && codexSkills.length > 0 && typeof document !== 'undefined' ? createPortal(
     <div
       data-timeline-codex-skill-picker="true"
@@ -2130,6 +2422,7 @@ const TimelineDirectorNode = ({ id, data, selected }: NodeProps) => {
     <>
       {skillPickerPortal}
       {keyframeStudio}
+      {templateWorkshopModal}
       <div
         className={`relative w-[480px] overflow-visible rounded-2xl border-2 text-sm shadow-2xl transition-all ${selected ? 'shadow-fuchsia-500/20' : ''}`}
         style={{
